@@ -5,6 +5,7 @@ import {
   Divider,
   FileButton,
   Flex,
+  Group,
   Radio,
   Select,
   Stack,
@@ -29,6 +30,11 @@ import storage, { StorageKey } from '@/storage'
 import { recoverSessionList } from '@/stores/chatStore'
 import { migrateOnData } from '@/stores/migration'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { add as addToast } from '@/stores/toastActions'
+import { useGoogleAuth } from '@/stores/googleAuthStore'
+import { GoogleAuthExpiredError, GoogleDriveNoBackupError, driveBackup, driveRestore } from '@/packages/google-drive'
+import { ExportDataItem, buildBackupJson, restoreFromBackupJson } from '@/packages/data-backup'
+import { CHATBOX_GOOGLE_CLIENT_ID_WEB, CHATBOX_GOOGLE_CLIENT_ID_DESKTOP } from '@/variables'
 
 export const Route = createFileRoute('/settings/general')({
   component: RouteComponent,
@@ -570,15 +576,128 @@ const ImportExportDataSection = () => {
           )}
         </FileButton>
       </Stack>
+
+      <GoogleDriveSection exportItems={exportItems} />
     </>
   )
 }
 
-enum ExportDataItem {
-  Setting = 'setting',
-  Key = 'key',
-  Conversations = 'conversations',
-  Copilot = 'copilot',
+// ---------------------------------------------------------------------------
+// Google Drive Backup Section
+// ---------------------------------------------------------------------------
+
+function isGoogleDriveAvailable(): boolean {
+  if (typeof window === 'undefined') return false
+  const isDesktop = !!(window as any).electronAPI
+  return isDesktop ? !!CHATBOX_GOOGLE_CLIENT_ID_DESKTOP : !!CHATBOX_GOOGLE_CLIENT_ID_WEB
+}
+
+const GoogleDriveSection = ({ exportItems }: { exportItems: ExportDataItem[] }) => {
+  const { t } = useTranslation()
+  const { accessToken, email, clearGoogleAuth } = useGoogleAuth()
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [isBackingUp, setIsBackingUp] = useState(false)
+  const [isRestoring, setIsRestoring] = useState(false)
+
+  if (!isGoogleDriveAvailable()) return null
+
+  const isConnected = !!accessToken
+  const isBusy = isConnecting || isBackingUp || isRestoring
+
+  const handleConnect = async () => {
+    if (isBusy) return
+    setIsConnecting(true)
+    try {
+      await platform.googleLogin?.()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      addToast(t('Failed to connect Google Drive: {{msg}}', { msg }))
+    } finally {
+      setIsConnecting(false)
+    }
+  }
+
+  const handleDisconnect = async () => {
+    await platform.googleLogout?.()
+  }
+
+  const handleBackup = async () => {
+    if (isBusy) return
+    setIsBackingUp(true)
+    try {
+      await driveBackup(exportItems)
+      addToast(t('Backup to Google Drive completed'))
+    } catch (err) {
+      if (err instanceof GoogleAuthExpiredError) {
+        clearGoogleAuth()
+        addToast(t('Google session expired, please reconnect Google Drive'))
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        addToast(t('Backup to Google Drive failed: {{msg}}', { msg }))
+      }
+    } finally {
+      setIsBackingUp(false)
+    }
+  }
+
+  const handleRestore = async () => {
+    if (isBusy) return
+    if (!window.confirm(t('This will overwrite your current data and restart the app. Continue?') as string)) return
+    setIsRestoring(true)
+    try {
+      await driveRestore()
+    } catch (err) {
+      if (err instanceof GoogleAuthExpiredError) {
+        clearGoogleAuth()
+        addToast(t('Google session expired, please reconnect Google Drive'))
+      } else if (err instanceof GoogleDriveNoBackupError) {
+        addToast(t('No backup found in Google Drive'))
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        addToast(t('Restore from Google Drive failed: {{msg}}', { msg }))
+      }
+      setIsRestoring(false)
+    }
+  }
+
+  return (
+    <>
+      <Divider />
+      <Stack gap="md">
+        <Stack gap="xxs">
+          <Title order={5}>{t('Google Drive Backup')}</Title>
+          <Text c="chatbox-tertiary">
+            {t('Back up and restore your data using your own Google Drive account')}
+          </Text>
+        </Stack>
+
+        {!isConnected ? (
+          <Button className="self-start" onClick={handleConnect} loading={isConnecting} disabled={isBusy}>
+            {t('Connect Google Drive')}
+          </Button>
+        ) : (
+          <>
+            <Group gap="sm" align="center">
+              <Text size="sm" c="green">
+                {email ? t('Connected as {{email}}', { email }) : t('Connected to Google Drive')}
+              </Text>
+              <Button variant="subtle" size="compact-sm" color="gray" onClick={handleDisconnect} disabled={isBusy}>
+                {t('Disconnect')}
+              </Button>
+            </Group>
+            <Group gap="sm">
+              <Button onClick={handleBackup} loading={isBackingUp} disabled={isBusy}>
+                {isBackingUp ? t('Backing up...') : t('Backup to Google Drive')}
+              </Button>
+              <Button variant="outline" onClick={handleRestore} loading={isRestoring} disabled={isBusy}>
+                {isRestoring ? t('Restoring...') : t('Restore from Google Drive')}
+              </Button>
+            </Group>
+          </>
+        )}
+      </Stack>
+    </>
+  )
 }
 
 const ExportLogsSection = () => {

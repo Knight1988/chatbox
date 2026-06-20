@@ -168,6 +168,10 @@ export default defineConfig(({ mode }) => {
         'process.env.USE_BETA_API': JSON.stringify(process.env.USE_BETA_API || ''),
         'process.env.USE_LOCAL_CHATBOX': JSON.stringify(process.env.USE_LOCAL_CHATBOX || ''),
         'process.env.USE_BETA_CHATBOX': JSON.stringify(process.env.USE_BETA_CHATBOX || ''),
+        'process.env.CHATBOX_GOOGLE_CLIENT_ID_WEB': JSON.stringify(process.env.CHATBOX_GOOGLE_CLIENT_ID_WEB || ''),
+        'process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP': JSON.stringify(
+          process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP || ''
+        ),
       },
     },
     preload: {
@@ -301,6 +305,10 @@ export default defineConfig(({ mode }) => {
         'process.env.USE_BETA_API': JSON.stringify(process.env.USE_BETA_API || ''),
         'process.env.USE_LOCAL_CHATBOX': JSON.stringify(process.env.USE_LOCAL_CHATBOX || ''),
         'process.env.USE_BETA_CHATBOX': JSON.stringify(process.env.USE_BETA_CHATBOX || ''),
+        'process.env.CHATBOX_GOOGLE_CLIENT_ID_WEB': JSON.stringify(process.env.CHATBOX_GOOGLE_CLIENT_ID_WEB || ''),
+        'process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP': JSON.stringify(
+          process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP || ''
+        ),
       },
       optimizeDeps: {
         include: ['mermaid'],

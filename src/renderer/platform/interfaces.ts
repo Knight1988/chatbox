@@ -100,6 +100,29 @@ export interface Platform extends Storage {
   isMaximized(): Promise<boolean>
 
   onMaximizedChange(callback: (isMaximized: boolean) => void): () => void
+
+  // Google OAuth (optional — only implemented on web and desktop, not mobile)
+
+  /**
+   * Trigger the platform-specific Google login flow.
+   * Stores tokens in googleAuthStore and returns them.
+   */
+  googleLogin?(): Promise<{
+    accessToken: string
+    refreshToken?: string // desktop only
+    expiresAt: number // epoch ms
+    email?: string
+  }>
+
+  /** Revoke the Google token and clear auth state. */
+  googleLogout?(): Promise<void>
+
+  /**
+   * Obtain a fresh access token (refresh_token on desktop, silent GIS on web).
+   * Updates googleAuthStore and returns the new access token.
+   * Throws if refresh fails — caller should clear auth and prompt re-login.
+   */
+  refreshGoogleAuth?(): Promise<string>
 }
 
 export interface Exporter {

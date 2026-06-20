@@ -11,6 +11,8 @@ import { IndexedDBStorage } from './storages'
 import WebExporter from './web_exporter'
 import webLogger from './web_logger'
 import { parseTextFileLocally } from './web_platform_utils'
+import { googleAuthStore } from '@/stores/googleAuthStore'
+import { CHATBOX_GOOGLE_CLIENT_ID_WEB } from '@/variables'
 
 export default class WebPlatform extends IndexedDBStorage implements Platform {
   public type: PlatformType = 'web'
@@ -208,5 +210,103 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
 
   public onMaximizedChange() {
     return () => null
+  }
+
+  // -------------------------------------------------------------------------
+  // Google OAuth (web: Google Identity Services token client popup)
+  // -------------------------------------------------------------------------
+
+  /** Lazy-load the GIS script once, then resolve. */
+  private _gisLoaded: Promise<void> | null = null
+  private loadGIS(): Promise<void> {
+    if (!this._gisLoaded) {
+      this._gisLoaded = new Promise<void>((resolve, reject) => {
+        if ((window as any).google?.accounts?.oauth2) {
+          resolve()
+          return
+        }
+        const script = document.createElement('script')
+        script.src = 'https://accounts.google.com/gsi/client'
+        script.onload = () => resolve()
+        script.onerror = () => reject(new Error('Failed to load Google Identity Services script'))
+        document.head.appendChild(script)
+      })
+    }
+    return this._gisLoaded
+  }
+
+  public async googleLogin(): Promise<{
+    accessToken: string
+    expiresAt: number
+    email?: string
+  }> {
+    if (!CHATBOX_GOOGLE_CLIENT_ID_WEB) throw new Error('Google client ID not configured')
+    await this.loadGIS()
+    return new Promise((resolve, reject) => {
+      const client = (window as any).google.accounts.oauth2.initTokenClient({
+        client_id: CHATBOX_GOOGLE_CLIENT_ID_WEB,
+        scope: 'https://www.googleapis.com/auth/drive.file openid email',
+        callback: (resp: any) => {
+          if (resp.error) {
+            reject(new Error(`Google login error: ${resp.error}`))
+            return
+          }
+          const expiresAt = Date.now() + Number(resp.expires_in) * 1000
+          let email: string | undefined
+          try {
+            if (resp.id_token) {
+              const payload = JSON.parse(atob(resp.id_token.split('.')[1]))
+              email = payload.email
+            }
+          } catch {
+            // email is optional
+          }
+          googleAuthStore.getState().setGoogleAuth({
+            accessToken: resp.access_token,
+            refreshToken: null,
+            expiresAt,
+            email: email ?? null,
+          })
+          resolve({ accessToken: resp.access_token, expiresAt, email })
+        },
+        error_callback: (err: any) => {
+          reject(new Error(`Google login cancelled or failed: ${JSON.stringify(err)}`))
+        },
+      })
+      client.requestAccessToken({ prompt: 'consent' })
+    })
+  }
+
+  public async googleLogout(): Promise<void> {
+    const { accessToken } = googleAuthStore.getState()
+    if (accessToken && (window as any).google?.accounts?.oauth2) {
+      ;(window as any).google.accounts.oauth2.revoke(accessToken, () => {})
+    }
+    googleAuthStore.getState().clearGoogleAuth()
+  }
+
+  public async refreshGoogleAuth(): Promise<string> {
+    if (!CHATBOX_GOOGLE_CLIENT_ID_WEB) throw new Error('Google client ID not configured')
+    await this.loadGIS()
+    return new Promise((resolve, reject) => {
+      const client = (window as any).google.accounts.oauth2.initTokenClient({
+        client_id: CHATBOX_GOOGLE_CLIENT_ID_WEB,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: (resp: any) => {
+          if (resp.error) {
+            reject(new Error(`Google refresh error: ${resp.error}`))
+            return
+          }
+          const expiresAt = Date.now() + Number(resp.expires_in) * 1000
+          googleAuthStore.getState().setGoogleAuth({ accessToken: resp.access_token, expiresAt })
+          resolve(resp.access_token)
+        },
+        error_callback: (err: any) => {
+          reject(new Error(`Google refresh failed: ${JSON.stringify(err)}`))
+        },
+      })
+      // prompt: '' triggers a silent token request without a popup if the session is still valid
+      client.requestAccessToken({ prompt: '' })
+    })
   }
 }

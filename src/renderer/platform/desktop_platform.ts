@@ -13,6 +13,7 @@ import DesktopKnowledgeBaseController from './knowledge-base/desktop-controller'
 import WebExporter from './web_exporter'
 import { getLogger } from '@/lib/utils'
 import { parseTextFileLocally } from './web_platform_utils'
+import { googleAuthStore } from '@/stores/googleAuthStore'
 
 const log = getLogger('desktop-platform')
 
@@ -306,5 +307,39 @@ export default class DesktopPlatform implements Platform {
     })
 
     return unsubscribe
+  }
+
+  // -------------------------------------------------------------------------
+  // Google OAuth (desktop: loopback + PKCE via main-process IPC)
+  // -------------------------------------------------------------------------
+
+  public async googleLogin() {
+    const r = await this.ipc.invoke('google:login')
+    const expiresAt = Date.now() + r.expires_in * 1000
+    googleAuthStore.getState().setGoogleAuth({
+      accessToken: r.access_token,
+      refreshToken: r.refresh_token ?? null,
+      expiresAt,
+      email: r.email ?? null,
+    })
+    return {
+      accessToken: r.access_token as string,
+      refreshToken: r.refresh_token as string | undefined,
+      expiresAt,
+      email: r.email as string | undefined,
+    }
+  }
+
+  public async googleLogout() {
+    googleAuthStore.getState().clearGoogleAuth()
+  }
+
+  public async refreshGoogleAuth(): Promise<string> {
+    const { refreshToken } = googleAuthStore.getState()
+    if (!refreshToken) throw new Error('No refresh token stored')
+    const r = await this.ipc.invoke('google:refresh', refreshToken)
+    const expiresAt = Date.now() + r.expires_in * 1000
+    googleAuthStore.getState().setGoogleAuth({ accessToken: r.access_token, expiresAt })
+    return r.access_token as string
   }
 }

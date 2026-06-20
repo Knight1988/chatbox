@@ -36,6 +36,7 @@ import {
   store,
 } from './store-node'
 import * as windowState from './window_state'
+import { googleLoginLoopback, googleRefresh } from './google-oauth'
 
 const knowledgeBaseInitPromise = import('./knowledge-base/index.js')
   .then((mod) => mod.getInitPromise())
@@ -753,4 +754,14 @@ ipcMain.handle('window:close', () => {
 
 ipcMain.handle('window:is-maximized', () => {
   return mainWindow?.isMaximized()
+})
+
+// --------- Google OAuth IPC ---------
+
+ipcMain.handle('google:login', async () => {
+  return googleLoginLoopback()
+})
+
+ipcMain.handle('google:refresh', async (_event, refreshToken: string) => {
+  return googleRefresh(refreshToken)
 })

@@ -879,5 +879,22 @@
   "Your HTML content has been published. You can access it via the link below.": "Your HTML content has been published. You can access it via the link below.",
   "Your license has expired.": "Your license has expired.",
   "Your license has expired. You can continue using your expansion pack.": "Your license has expired. You can continue using your expansion pack.",
-  "Your rating on the App Store would help make Chatbox even better!": "Your rating on the App Store would help make Chatbox even better!"
+  "Your rating on the App Store would help make Chatbox even better!": "Your rating on the App Store would help make Chatbox even better!",
+  "Google Drive Backup": "Google Drive Backup",
+  "Back up and restore your data using your own Google Drive account": "Back up and restore your data using your own Google Drive account",
+  "Connect Google Drive": "Connect Google Drive",
+  "Connected to Google Drive": "Connected to Google Drive",
+  "Connected as {{email}}": "Connected as {{email}}",
+  "Disconnect": "Disconnect",
+  "Backup to Google Drive": "Backup to Google Drive",
+  "Restore from Google Drive": "Restore from Google Drive",
+  "Backing up...": "Backing up...",
+  "Restoring...": "Restoring...",
+  "Backup to Google Drive completed": "Backup to Google Drive completed",
+  "Backup to Google Drive failed: {{msg}}": "Backup to Google Drive failed: {{msg}}",
+  "Restore from Google Drive failed: {{msg}}": "Restore from Google Drive failed: {{msg}}",
+  "No backup found in Google Drive": "No backup found in Google Drive",
+  "Google session expired, please reconnect Google Drive": "Google session expired, please reconnect Google Drive",
+  "Failed to connect Google Drive: {{msg}}": "Failed to connect Google Drive: {{msg}}",
+  "This will overwrite your current data and restart the app. Continue?": "This will overwrite your current data and restart the app. Continue?"
 }
