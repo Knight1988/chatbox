@@ -30,6 +30,10 @@ import {
   trackGenerateEvent,
 } from './utils'
 
+// 5-minute wall-clock deadline for any single LLM chat request.
+// Long reasoning / large-context calls can otherwise hang the UI.
+const LLM_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+
 export async function orchestrateGeneration(
   sessionId: string,
   targetMsg: Message,
@@ -60,6 +64,9 @@ export async function orchestrateGeneration(
   const { messages, index: targetMsgIx } = found
 
   const controller = new AbortController()
+  const timeoutController = new AbortController()
+  const timeoutId = setTimeout(() => timeoutController.abort(), LLM_REQUEST_TIMEOUT_MS)
+  const chatSignal = AbortSignal.any([controller.signal, timeoutController.signal])
 
   try {
     const dependencies = await createModelDependencies()
@@ -136,7 +143,7 @@ export async function orchestrateGeneration(
 
     const chatOptions: ChatStreamOptions = {
       sessionId: session.id,
-      signal: controller.signal,
+      signal: chatSignal,
       providerOptions: settings.providerOptions,
       maxSteps: 10,
     }
@@ -232,5 +239,7 @@ export async function orchestrateGeneration(
 
     targetMsg = handleGenerationError(err, targetMsg, settings)
     await persistStreamingMessage(sessionId, targetMsg, { refreshCounting: true })
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
