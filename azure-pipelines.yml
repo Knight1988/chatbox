@@ -1,0 +1,127 @@
+trigger:
+  branches:
+    include:
+      - main
+      - beta
+
+pool:
+  name: Ubuntu
+
+variables:
+  IMAGE_NAME: knight1988/chatbox
+  DOCKER_TAG: $(Build.SourceBranchName)
+
+stages:
+  - stage: Test
+    displayName: Build and Test
+    jobs:
+      - job: UnitTests
+        displayName: Run Unit Tests
+        pool:
+          name: Ubuntu
+        steps:
+          - checkout: self
+            displayName: Checkout source
+
+          - script: |
+              export NVM_DIR="$HOME/.nvm"
+              [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+              export PATH="$(dirname "$(nvm which current 2>/dev/null || command -v node)"):$PATH"
+              echo "Using node: $(which node) ($(node -v))"
+
+              # Activate pnpm via corepack
+              corepack enable
+              corepack prepare pnpm@10.33.0 --activate
+              echo "Using pnpm: $(which pnpm) ($(pnpm -v))"
+
+              pnpm install --frozen-lockfile --ignore-scripts
+              pnpm test
+            displayName: Run Vitest unit tests
+
+  - stage: Build
+    displayName: Build and Push Docker Image
+    dependsOn: Test
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranchName'], 'main'), eq(variables['Build.SourceBranchName'], 'beta')))
+    jobs:
+      - job: Build
+        displayName: Build and Push
+        pool:
+          name: Ubuntu
+        steps:
+          - checkout: self
+            displayName: Checkout source
+
+          - script: |
+              echo "Building Docker image $(IMAGE_NAME):$(DOCKER_TAG)..."
+              docker build \
+                --build-arg CHATBOX_GOOGLE_CLIENT_ID_WEB="$(CHATBOX_GOOGLE_CLIENT_ID_WEB)" \
+                --build-arg CHATBOX_GOOGLE_CLIENT_ID_DESKTOP="$(CHATBOX_GOOGLE_CLIENT_ID_DESKTOP)" \
+                -t "$(IMAGE_NAME):$(DOCKER_TAG)" \
+                .
+            displayName: Build Docker image
+            env:
+              CHATBOX_GOOGLE_CLIENT_ID_WEB: $(CHATBOX_GOOGLE_CLIENT_ID_WEB)
+              CHATBOX_GOOGLE_CLIENT_ID_DESKTOP: $(CHATBOX_GOOGLE_CLIENT_ID_DESKTOP)
+
+          - script: |
+              echo "Pushing Docker image $(IMAGE_NAME):$(DOCKER_TAG)..."
+              docker push "$(IMAGE_NAME):$(DOCKER_TAG)"
+            displayName: Push Docker image
+
+  - stage: Deploy
+    displayName: Redeploy Portainer
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'beta'))
+    jobs:
+      - job: Deploy
+        displayName: Redeploy via Portainer
+        pool:
+          name: Ubuntu
+        steps:
+          - script: |
+              set -euo pipefail
+              PORTAINER_URL="https://dk-server.linkpc.net/portainer"
+              STACK_ID=24
+              ENDPOINT_ID=3
+              MAX_RETRIES=3
+              RETRY_DELAY=10
+
+              echo "Fetching current stack file from Portainer..."
+              STACK_FILE=$(curl -fsSL --max-time 30 \
+                -H "X-API-Key: $(PORTAINER_API_KEY)" \
+                "${PORTAINER_URL}/api/stacks/${STACK_ID}/file" \
+                | jq -r '.StackFileContent')
+
+              if [ -z "$STACK_FILE" ] || [ "$STACK_FILE" = "null" ]; then
+                echo "Failed to retrieve stack file"; exit 1
+              fi
+
+              echo "Triggering Portainer redeploy with image pull..."
+              PAYLOAD=$(jq -n \
+                --arg file "$STACK_FILE" \
+                '{stackFileContent: $file, env: [], prune: false, pullImage: true}')
+
+              for i in $(seq 1 $MAX_RETRIES); do
+                echo "Attempt $i of $MAX_RETRIES..."
+                if curl -fsSL -X PUT --max-time 120 \
+                  -H "X-API-Key: $(PORTAINER_API_KEY)" \
+                  -H "Content-Type: application/json" \
+                  --data "$PAYLOAD" \
+                  "${PORTAINER_URL}/api/stacks/${STACK_ID}?endpointId=${ENDPOINT_ID}"; then
+                  echo
+                  echo "Portainer redeploy successful."
+                  exit 0
+                else
+                  EXIT_CODE=$?
+                  echo "Attempt $i failed with exit code $EXIT_CODE"
+                  if [ $i -lt $MAX_RETRIES ]; then
+                    echo "Waiting ${RETRY_DELAY}s before retry..."
+                    sleep $RETRY_DELAY
+                  fi
+                fi
+              done
+              echo "All retry attempts failed."
+              exit 1
+            displayName: Redeploy chatbox stack via Portainer
+            env:
+              PORTAINER_API_KEY: $(PORTAINER_API_KEY)
