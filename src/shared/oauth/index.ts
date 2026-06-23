@@ -11,6 +11,48 @@ export interface OAuthProviderInfo {
   flowType: 'callback' | 'code-paste' | 'device-code'
 }
 
+export interface OAuthCredentials {
+  accessToken: string
+  refreshToken?: string
+  expiresAt?: number
+  scope?: string
+  tokenType?: string
+}
+
+export interface OAuthResult {
+  success: boolean
+  credentials?: OAuthCredentials
+  error?: string
+}
+
+export interface OAuthStartResult {
+  success: boolean
+  // For code-paste flow
+  verificationUrl?: string
+  userCode?: string
+  error?: string
+}
+
+export interface DeviceFlowStartResult extends OAuthStartResult {
+  deviceCode?: string
+  interval?: number
+}
+
+/**
+ * IPC channel names used by the desktop OAuth flows.
+ * Stubbed here so the renderer hook that references them can compile
+ * in the open-source edition (no IPC traffic actually flows).
+ */
+export const OAuthIpcChannels = {
+  LOGIN: 'oauth:login',
+  CANCEL: 'oauth:cancel',
+  START_LOGIN: 'oauth:start-login',
+  EXCHANGE_CODE: 'oauth:exchange-code',
+  START_DEVICE_FLOW: 'oauth:start-device-flow',
+  WAIT_DEVICE_TOKEN: 'oauth:wait-device-token',
+  REFRESH: 'oauth:refresh',
+} as const
+
 export function mergeSharedOAuthProviderSettings(
   providerId: string,
   providers: Record<string, ProviderSettings> | undefined
