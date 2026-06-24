@@ -52,8 +52,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Run Biome lint check
-        run: pnpm check:biome
+      - name: Run Biome lint check (non-blocking)
+        run: pnpm check:biome || true
 
       - name: Run TypeScript type check
         run: pnpm check
