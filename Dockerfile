@@ -27,6 +27,8 @@ ARG CHATBOX_GOOGLE_CLIENT_ID_WEB=""
 ARG CHATBOX_GOOGLE_CLIENT_ID_DESKTOP=""
 ENV CHATBOX_GOOGLE_CLIENT_ID_WEB=${CHATBOX_GOOGLE_CLIENT_ID_WEB}
 ENV CHATBOX_GOOGLE_CLIENT_ID_DESKTOP=${CHATBOX_GOOGLE_CLIENT_ID_DESKTOP}
+# Raise Node.js heap limit to prevent OOM during the large electron-vite build
+ENV NODE_OPTIONS=--max-old-space-size=4096
 
 RUN pnpm exec cross-env CHATBOX_BUILD_PLATFORM=web electron-vite build && find /app/release/app/dist -name '*.js.map' -delete
 
