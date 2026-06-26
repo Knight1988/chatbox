@@ -14,10 +14,11 @@ export function injectBaseTag(): Plugin {
   return {
     name: 'inject-base-tag',
     transformIndexHtml() {
+      const basePath = process.env.BASE_PATH || '/'
       return [
         {
           tag: 'base',
-          attrs: { href: '/' },
+          attrs: { href: basePath },
           injectTo: 'head-prepend', // Inject at the beginning of <head>
         },
       ]
@@ -309,6 +310,9 @@ export default defineConfig(({ mode }) => {
         'process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP': JSON.stringify(
           process.env.CHATBOX_GOOGLE_CLIENT_ID_DESKTOP || ''
         ),
+        // Expose BASE_PATH so router.tsx can read import.meta.env.BASE_PATH at build time.
+        // Vite only auto-exposes VITE_-prefixed env vars; we bridge the gap here.
+        'import.meta.env.BASE_PATH': JSON.stringify(process.env.BASE_PATH || '/'),
       },
       optimizeDeps: {
         include: ['mermaid'],

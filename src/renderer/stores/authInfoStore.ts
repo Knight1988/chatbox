@@ -1,6 +1,7 @@
 import { createStore, useStore } from 'zustand'
 import { persist, subscribeWithSelector } from 'zustand/middleware'
 import { immer } from 'zustand/middleware/immer'
+import { useShallow } from 'zustand/react/shallow'
 import type { AuthTokens } from '../routes/settings/provider/chatbox-ai/-components/types'
 
 interface AuthTokensState {
@@ -67,11 +68,13 @@ export function useAuthInfoStore<U>(selector: Parameters<typeof useStore<typeof 
 }
 
 export const useAuthTokens = () => {
-  return useAuthInfoStore((state) => ({
-    accessToken: state.accessToken,
-    refreshToken: state.refreshToken,
-    setTokens: state.setTokens,
-    clearTokens: state.clearTokens,
-    getTokens: state.getTokens,
-  }))
+  return useAuthInfoStore(
+    useShallow((state) => ({
+      accessToken: state.accessToken,
+      refreshToken: state.refreshToken,
+      setTokens: state.setTokens,
+      clearTokens: state.clearTokens,
+      getTokens: state.getTokens,
+    }))
+  )
 }

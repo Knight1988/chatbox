@@ -27,6 +27,9 @@ ARG CHATBOX_GOOGLE_CLIENT_ID_WEB=""
 ARG CHATBOX_GOOGLE_CLIENT_ID_DESKTOP=""
 ENV CHATBOX_GOOGLE_CLIENT_ID_WEB=${CHATBOX_GOOGLE_CLIENT_ID_WEB}
 ENV CHATBOX_GOOGLE_CLIENT_ID_DESKTOP=${CHATBOX_GOOGLE_CLIENT_ID_DESKTOP}
+# Base path for serving under a sub-path (e.g. /chatbox/). Passed by deploy.yml build-arg.
+ARG CHATBOX_BASE_PATH=/
+ENV BASE_PATH=${CHATBOX_BASE_PATH}
 # Raise Node.js heap limit to prevent OOM during the large electron-vite build
 ENV NODE_OPTIONS=--max-old-space-size=4096
 

@@ -1,6 +1,7 @@
 import { createStore, useStore } from 'zustand'
 import { persist, subscribeWithSelector } from 'zustand/middleware'
 import { immer } from 'zustand/middleware/immer'
+import { useShallow } from 'zustand/react/shallow'
 
 interface GoogleAuthState {
   accessToken: string | null
@@ -71,15 +72,17 @@ export function useGoogleAuthStore<U>(
 }
 
 export const useGoogleAuth = () => {
-  return useGoogleAuthStore((state) => ({
-    accessToken: state.accessToken,
-    refreshToken: state.refreshToken,
-    expiresAt: state.expiresAt,
-    email: state.email,
-    setGoogleAuth: state.setGoogleAuth,
-    clearGoogleAuth: state.clearGoogleAuth,
-    getGoogleAuth: state.getGoogleAuth,
-  }))
+  return useGoogleAuthStore(
+    useShallow((state) => ({
+      accessToken: state.accessToken,
+      refreshToken: state.refreshToken,
+      expiresAt: state.expiresAt,
+      email: state.email,
+      setGoogleAuth: state.setGoogleAuth,
+      clearGoogleAuth: state.clearGoogleAuth,
+      getGoogleAuth: state.getGoogleAuth,
+    }))
+  )
 }
 
 /** Returns true if the user has a valid (non-expired) Google access token */

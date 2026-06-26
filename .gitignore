@@ -181,6 +181,7 @@ electron-builder.env
 temp.md
 .sisyphus/
 .playwright-cli/
+.playwright-mcp/
 node-compile-cache/
 
 *storybook.log
