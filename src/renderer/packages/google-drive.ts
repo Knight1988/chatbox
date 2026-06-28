@@ -3,18 +3,20 @@
  * Uses plain fetch + Bearer tokens — no googleapis SDK.
  * Scope required: https://www.googleapis.com/auth/drive.file
  *
- * The app creates/updates a single file named "chatbox-backup.json" in the
- * user's Drive (visible to the user, owned by the user).
+ * Each backup creates a new timestamped file named
+ * "chatbox-backup-YYYY-MM-DD HH:mm:ss.json" in the user's Drive.
+ * After each backup, files beyond the 3 most recent are deleted.
  */
+import dayjs from 'dayjs'
 import platform from '@/platform'
 import { googleAuthStore } from '@/stores/googleAuthStore'
 import { type ExportDataItem, buildBackupJson, restoreFromBackupJson } from './data-backup'
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3'
-const BACKUP_FILENAME = 'chatbox-backup.json'
 const BACKUP_APP_PROPERTY_KEY = 'chatboxBackup'
 const BACKUP_APP_PROPERTY_VALUE = 'true'
+const MAX_BACKUP_VERSIONS = 3
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -69,20 +71,20 @@ async function getValidAccessToken(): Promise<string> {
 // Drive REST helpers
 // ---------------------------------------------------------------------------
 
-interface DriveFile {
+export interface DriveBackupFile {
   id: string
-  modifiedTime?: string
+  name: string
+  modifiedTime: string
 }
 
 /**
- * Find the most recently modified chatbox backup file in Drive.
- * Returns null if none found.
+ * List all chatbox backup files in Drive, sorted newest-first.
  */
-async function findBackupFile(token: string): Promise<DriveFile | null> {
+async function listBackupFiles(token: string): Promise<DriveBackupFile[]> {
   const q = encodeURIComponent(
-    `name='${BACKUP_FILENAME}' and trashed=false and appProperties has { key='${BACKUP_APP_PROPERTY_KEY}' and value='${BACKUP_APP_PROPERTY_VALUE}' }`
+    `trashed=false and appProperties has { key='${BACKUP_APP_PROPERTY_KEY}' and value='${BACKUP_APP_PROPERTY_VALUE}' }`
   )
-  const url = `${DRIVE_API}/files?q=${q}&spaces=drive&fields=files(id,modifiedTime)&orderBy=modifiedTime+desc`
+  const url = `${DRIVE_API}/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc`
 
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
@@ -92,17 +94,17 @@ async function findBackupFile(token: string): Promise<DriveFile | null> {
     throw new Error(`Drive files.list failed: ${resp.status} ${resp.statusText}`)
   }
 
-  const data: { files: DriveFile[] } = await resp.json()
-  return data.files?.[0] ?? null
+  const data: { files: DriveBackupFile[] } = await resp.json()
+  return data.files ?? []
 }
 
 /**
  * Create a new backup file in Drive using multipart upload.
  */
-async function createBackupFile(token: string, jsonContent: string): Promise<void> {
+async function createBackupFile(token: string, filename: string, jsonContent: string): Promise<void> {
   const boundary = 'chatbox_backup_boundary'
   const metadata = JSON.stringify({
-    name: BACKUP_FILENAME,
+    name: filename,
     mimeType: 'application/json',
     appProperties: { [BACKUP_APP_PROPERTY_KEY]: BACKUP_APP_PROPERTY_VALUE },
   })
@@ -134,20 +136,17 @@ async function createBackupFile(token: string, jsonContent: string): Promise<voi
 }
 
 /**
- * Update the content of an existing backup file in Drive.
+ * Delete a backup file from Drive by its file ID.
  */
-async function updateBackupFile(token: string, fileId: string, jsonContent: string): Promise<void> {
-  const resp = await fetch(`${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: jsonContent,
+async function deleteBackupFile(token: string, fileId: string): Promise<void> {
+  const resp = await fetch(`${DRIVE_API}/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
   })
 
-  if (!resp.ok) {
-    throw new Error(`Drive files.update failed: ${resp.status} ${resp.statusText}`)
+  // 204 = success, 404 = already gone — both are acceptable
+  if (!resp.ok && resp.status !== 404) {
+    throw new Error(`Drive files.delete failed: ${resp.status} ${resp.statusText}`)
   }
 }
 
@@ -164,6 +163,26 @@ async function downloadBackupFile(token: string, fileId: string): Promise<string
   }
 
   return resp.text()
+}
+
+/**
+ * Delete all backup files beyond the N most recent.
+ * Errors are swallowed so a prune failure never fails the backup itself.
+ */
+async function pruneOldBackups(token: string): Promise<void> {
+  try {
+    const files = await listBackupFiles(token)
+    const toDelete = files.slice(MAX_BACKUP_VERSIONS)
+    for (const file of toDelete) {
+      try {
+        await deleteBackupFile(token, file.id)
+      } catch (err) {
+        console.warn(`Failed to delete old backup ${file.name}:`, err)
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to prune old backups:', err)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,34 +222,42 @@ async function withTokenRetry<T>(fn: (token: string) => Promise<T>): Promise<T> 
 // ---------------------------------------------------------------------------
 
 /**
- * Serialize selected data and upload/update the backup file in Google Drive.
+ * Serialize selected data and upload a new timestamped backup file to Google Drive.
+ * After upload, prunes old backups beyond MAX_BACKUP_VERSIONS.
  */
 export async function driveBackup(exportItems: ExportDataItem[]): Promise<void> {
   const jsonContent = await buildBackupJson(exportItems)
+  const filename = `chatbox-backup-${dayjs().format('YYYY-MM-DD HH:mm:ss')}.json`
 
   await withTokenRetry(async (token) => {
-    const existing = await findBackupFile(token)
-    if (existing) {
-      await updateBackupFile(token, existing.id, jsonContent)
-    } else {
-      await createBackupFile(token, jsonContent)
-    }
+    await createBackupFile(token, filename, jsonContent)
+    await pruneOldBackups(token)
   })
 }
 
 /**
- * Download the most recent backup from Google Drive and restore it.
- * Calls platform.relaunch() on success (via restoreFromBackupJson).
- * Throws GoogleDriveNoBackupError if no backup exists.
+ * List all available backup versions in Google Drive, sorted newest-first.
  * Throws GoogleAuthExpiredError if auth is missing/expired and refresh fails.
+ * Throws GoogleDriveNoBackupError if no backups exist.
  */
-export async function driveRestore(): Promise<void> {
-  await withTokenRetry(async (token) => {
-    const file = await findBackupFile(token)
-    if (!file) {
+export async function driveListBackups(): Promise<DriveBackupFile[]> {
+  return withTokenRetry(async (token) => {
+    const files = await listBackupFiles(token)
+    if (files.length === 0) {
       throw new GoogleDriveNoBackupError()
     }
-    const jsonText = await downloadBackupFile(token, file.id)
+    return files
+  })
+}
+
+/**
+ * Download the specified backup from Google Drive and restore it.
+ * Calls platform.relaunch() on success (via restoreFromBackupJson).
+ * Throws GoogleAuthExpiredError if auth is missing/expired and refresh fails.
+ */
+export async function driveRestore(fileId: string): Promise<void> {
+  await withTokenRetry(async (token) => {
+    const jsonText = await downloadBackupFile(token, fileId)
     await restoreFromBackupJson(jsonText)
   })
 }

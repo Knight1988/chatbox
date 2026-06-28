@@ -14,6 +14,7 @@ import {
   TextInput,
   Title,
 } from '@mantine/core'
+import { AdaptiveModal } from '@/components/common/AdaptiveModal'
 import { type Language, type ProviderInfo, type Settings, Theme } from '@shared/types'
 import { formatFileSize } from '@shared/utils'
 import { IconInfoCircle } from '@tabler/icons-react'
@@ -32,7 +33,14 @@ import { migrateOnData } from '@/stores/migration'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { add as addToast } from '@/stores/toastActions'
 import { useGoogleAuth } from '@/stores/googleAuthStore'
-import { GoogleAuthExpiredError, GoogleDriveNoBackupError, driveBackup, driveRestore } from '@/packages/google-drive'
+import {
+  type DriveBackupFile,
+  GoogleAuthExpiredError,
+  GoogleDriveNoBackupError,
+  driveBackup,
+  driveListBackups,
+  driveRestore,
+} from '@/packages/google-drive'
 import { ExportDataItem, buildBackupJson, restoreFromBackupJson } from '@/packages/data-backup'
 import { CHATBOX_GOOGLE_CLIENT_ID_WEB, CHATBOX_GOOGLE_CLIENT_ID_DESKTOP } from '@/variables'
 
@@ -592,12 +600,74 @@ function isGoogleDriveAvailable(): boolean {
   return isDesktop ? !!CHATBOX_GOOGLE_CLIENT_ID_DESKTOP : !!CHATBOX_GOOGLE_CLIENT_ID_WEB
 }
 
+interface RestoreVersionModalProps {
+  opened: boolean
+  onClose: () => void
+  versions: DriveBackupFile[]
+  onConfirm: (fileId: string) => void
+  isRestoring: boolean
+}
+
+const RestoreVersionModal = ({ opened, onClose, versions, onConfirm, isRestoring }: RestoreVersionModalProps) => {
+  const { t } = useTranslation()
+  const [selectedId, setSelectedId] = useState<string>(versions[0]?.id ?? '')
+
+  // Keep selection valid when versions list changes
+  useEffect(() => {
+    if (versions.length > 0 && !versions.find((v) => v.id === selectedId)) {
+      setSelectedId(versions[0].id)
+    }
+  }, [versions, selectedId])
+
+  const handleConfirm = () => {
+    if (selectedId) onConfirm(selectedId)
+  }
+
+  return (
+    <AdaptiveModal opened={opened} onClose={onClose} title={t('Restore from Google Drive')} centered size="md">
+      <Stack gap="md">
+        <Text size="sm" c="chatbox-tertiary">
+          {t('Select a backup version to restore. This will overwrite your current data and restart the app.')}
+        </Text>
+        <Radio.Group value={selectedId} onChange={setSelectedId}>
+          <Stack gap="xs">
+            {versions.map((v, idx) => (
+              <Radio
+                key={v.id}
+                value={v.id}
+                label={
+                  <Group gap="xs">
+                    <Text size="sm">{v.name.replace(/^chatbox-backup-/, '').replace(/\.json$/, '')}</Text>
+                    {idx === 0 && (
+                      <Text size="xs" c="green">
+                        ({t('Latest')})
+                      </Text>
+                    )}
+                  </Group>
+                }
+              />
+            ))}
+          </Stack>
+        </Radio.Group>
+        <AdaptiveModal.Actions>
+          <AdaptiveModal.CloseButton onClick={onClose} />
+          <Button onClick={handleConfirm} loading={isRestoring} disabled={!selectedId || isRestoring}>
+            {t('Restore')}
+          </Button>
+        </AdaptiveModal.Actions>
+      </Stack>
+    </AdaptiveModal>
+  )
+}
+
 const GoogleDriveSection = ({ exportItems }: { exportItems: ExportDataItem[] }) => {
   const { t } = useTranslation()
   const { accessToken, email, clearGoogleAuth } = useGoogleAuth()
   const [isConnecting, setIsConnecting] = useState(false)
   const [isBackingUp, setIsBackingUp] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
+  const [restoreModalOpen, setRestoreModalOpen] = useState(false)
+  const [backupVersions, setBackupVersions] = useState<DriveBackupFile[]>([])
 
   if (!isGoogleDriveAvailable()) return null
 
@@ -640,12 +710,13 @@ const GoogleDriveSection = ({ exportItems }: { exportItems: ExportDataItem[] }) 
     }
   }
 
-  const handleRestore = async () => {
+  const handleOpenRestoreModal = async () => {
     if (isBusy) return
-    if (!window.confirm(t('This will overwrite your current data and restart the app. Continue?') as string)) return
     setIsRestoring(true)
     try {
-      await driveRestore()
+      const versions = await driveListBackups()
+      setBackupVersions(versions)
+      setRestoreModalOpen(true)
     } catch (err) {
       if (err instanceof GoogleAuthExpiredError) {
         clearGoogleAuth()
@@ -656,7 +727,26 @@ const GoogleDriveSection = ({ exportItems }: { exportItems: ExportDataItem[] }) 
         const msg = err instanceof Error ? err.message : String(err)
         addToast(t('Restore from Google Drive failed: {{msg}}', { msg }))
       }
+    } finally {
       setIsRestoring(false)
+    }
+  }
+
+  const handleRestoreConfirm = async (fileId: string) => {
+    setIsRestoring(true)
+    try {
+      await driveRestore(fileId)
+      // app relaunches on success — no further UI update needed
+    } catch (err) {
+      if (err instanceof GoogleAuthExpiredError) {
+        clearGoogleAuth()
+        addToast(t('Google session expired, please reconnect Google Drive'))
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        addToast(t('Restore from Google Drive failed: {{msg}}', { msg }))
+      }
+      setIsRestoring(false)
+      setRestoreModalOpen(false)
     }
   }
 
@@ -689,13 +779,21 @@ const GoogleDriveSection = ({ exportItems }: { exportItems: ExportDataItem[] }) 
               <Button onClick={handleBackup} loading={isBackingUp} disabled={isBusy}>
                 {isBackingUp ? t('Backing up...') : t('Backup to Google Drive')}
               </Button>
-              <Button variant="outline" onClick={handleRestore} loading={isRestoring} disabled={isBusy}>
-                {isRestoring ? t('Restoring...') : t('Restore from Google Drive')}
+              <Button variant="outline" onClick={handleOpenRestoreModal} loading={isRestoring} disabled={isBusy}>
+                {isRestoring ? t('Loading backups...') : t('Restore from Google Drive')}
               </Button>
             </Group>
           </>
         )}
       </Stack>
+
+      <RestoreVersionModal
+        opened={restoreModalOpen}
+        onClose={() => setRestoreModalOpen(false)}
+        versions={backupVersions}
+        onConfirm={handleRestoreConfirm}
+        isRestoring={isRestoring}
+      />
     </>
   )
 }
