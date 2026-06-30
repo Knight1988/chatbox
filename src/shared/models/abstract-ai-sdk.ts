@@ -38,11 +38,56 @@ import type {
   ModelStreamPart,
 } from './types'
 
-const RETRY_CONFIG = {
+export const RETRY_CONFIG = {
   MAX_ATTEMPTS: 5,
   INITIAL_DELAY_MS: 1000,
   BACKOFF_FACTOR: 2,
 } as const
+
+/**
+ * Returns true if a completed stream produced no meaningful content.
+ * Meaningful = at least one non-whitespace text, reasoning, tool-call, image, or file part.
+ */
+export function isEmptyCompletion(contentParts: MessageContentParts): boolean {
+  return !contentParts.some((part) => {
+    switch (part.type) {
+      case 'text':
+        return part.text.trim().length > 0
+      case 'reasoning':
+      case 'tool-call':
+      case 'image':
+      case 'file':
+        return true
+      default:
+        return false
+    }
+  })
+}
+
+/**
+ * Returns a promise that resolves after `ms` milliseconds,
+ * but rejects immediately if the AbortSignal fires.
+ */
+export function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+
+    const onAbort = () => {
+      clearTimeout(timeoutId)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+
+    const timeoutId = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 function is5xxError(error: unknown): boolean {
   if (APICallError.isInstance(error)) {
@@ -605,56 +650,94 @@ export default abstract class AbstractAISDKModel implements ModelInterface {
     options: CallChatCompletionOptions<T>,
     callSettings: CallSettings
   ): Promise<StreamTextResult> {
-    const result = streamText({
-      model,
-      messages: coreMessages,
-      stopWhen: stepCountIs(options.maxSteps || Number.MAX_SAFE_INTEGER),
-      tools: options.tools,
-      abortSignal: options.signal,
-      ...callSettings,
-    })
+    for (let attempt = 1; attempt <= RETRY_CONFIG.MAX_ATTEMPTS; attempt++) {
+      const result = streamText({
+        model,
+        messages: coreMessages,
+        stopWhen: stepCountIs(options.maxSteps || Number.MAX_SAFE_INTEGER),
+        tools: options.tools,
+        abortSignal: options.signal,
+        ...callSettings,
+      })
 
-    const contentParts: MessageContentParts = []
-    let currentTextPart: MessageTextPart | undefined
-    let currentReasoningPart: MessageReasoningPart | undefined
+      const contentParts: MessageContentParts = []
+      let currentTextPart: MessageTextPart | undefined
+      let currentReasoningPart: MessageReasoningPart | undefined
 
-    try {
-      for await (const chunk of result.fullStream) {
-        // console.debug('stream chunk', chunk)
+      try {
+        for await (const chunk of result.fullStream) {
+          // console.debug('stream chunk', chunk)
 
-        // Handle error chunks
-        if (chunk.type === 'error') {
-          this.handleError(chunk.error)
+          // Handle error chunks
+          if (chunk.type === 'error') {
+            this.handleError(chunk.error)
+          }
+
+          const chunkResult = await this.processStreamChunk(
+            chunk,
+            contentParts,
+            currentTextPart,
+            currentReasoningPart,
+            options
+          )
+          currentTextPart = chunkResult.currentTextPart
+          currentReasoningPart = chunkResult.currentReasoningPart
+
+          options.onResultChange?.({ contentParts })
         }
+      } catch (error) {
+        // Ensure reasoning parts get their duration set even if streaming is interrupted
+        if (currentReasoningPart?.startTime && !currentReasoningPart.duration) {
+          currentReasoningPart.duration = Date.now() - currentReasoningPart.startTime
+        }
+        throw error
+      }
 
-        const chunkResult = await this.processStreamChunk(
-          chunk,
+      // Check for empty response — retry if needed
+      if (!isEmptyCompletion(contentParts)) {
+        return this.finalizeResult(
           contentParts,
-          currentTextPart,
-          currentReasoningPart,
+          {
+            usage: await result.totalUsage,
+            finishReason: await result.finishReason,
+          },
           options
         )
-        currentTextPart = chunkResult.currentTextPart
-        currentReasoningPart = chunkResult.currentReasoningPart
+      }
 
-        options.onResultChange?.({ contentParts })
+      console.warn(
+        `[empty-completion] Provider returned empty response on attempt ${attempt}/${RETRY_CONFIG.MAX_ATTEMPTS} (model: ${this.modelId})`
+      )
+
+      if (attempt < RETRY_CONFIG.MAX_ATTEMPTS) {
+        // Emit retry status for UI feedback
+        options.onStatusChange?.({
+          type: 'retrying',
+          attempt,
+          maxAttempts: RETRY_CONFIG.MAX_ATTEMPTS,
+          error: 'Empty response from provider',
+        })
+
+        const delay = RETRY_CONFIG.INITIAL_DELAY_MS * Math.pow(RETRY_CONFIG.BACKOFF_FACTOR, attempt - 1)
+        await abortableDelay(delay, options.signal)
+      } else {
+        console.error(
+          `[empty-completion] All ${RETRY_CONFIG.MAX_ATTEMPTS} attempts returned empty response (model: ${this.modelId})`
+        )
+        // All retries exhausted — return the empty result (graceful degradation)
+        return this.finalizeResult(
+          contentParts,
+          {
+            usage: await result.totalUsage,
+            finishReason: await result.finishReason,
+          },
+          options
+        )
       }
-    } catch (error) {
-      // Ensure reasoning parts get their duration set even if streaming is interrupted
-      if (currentReasoningPart?.startTime && !currentReasoningPart.duration) {
-        currentReasoningPart.duration = Date.now() - currentReasoningPart.startTime
-      }
-      throw error
     }
 
-    return this.finalizeResult(
-      contentParts,
-      {
-        usage: await result.totalUsage,
-        finishReason: await result.finishReason,
-      },
-      options
-    )
+    // Should never reach here, but TypeScript needs a return
+    return this.finalizeResult([], {}, options)
   }
 
   private async _callChatCompletion<T extends ToolSet>(

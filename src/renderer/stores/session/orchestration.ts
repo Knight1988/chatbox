@@ -1,6 +1,7 @@
 import { buildContext } from '@shared/context'
 import { getModel } from '@shared/models'
 import { ChatboxAIAPIError } from '@shared/models/errors'
+import { RETRY_CONFIG, abortableDelay, isEmptyCompletion } from '@shared/models/abstract-ai-sdk'
 import type { ChatStreamOptions, ModelStreamPart } from '@shared/models/types'
 import { type Message, type MessageContentParts, ModelProviderEnum } from '@shared/types'
 import { getMessageText, sequenceMessages } from '@shared/utils/message'
@@ -152,10 +153,6 @@ export async function orchestrateGeneration(
       chatOptions.tools = tools as ToolSet
     }
 
-    const stream = model.chatStream(coreMessages, chatOptions) as AsyncGenerator<ModelStreamPart<ToolSet>>
-
-    let processorState = createInitialState(fallbackToolCallPart ? [fallbackToolCallPart] : undefined)
-
     const streamCallbacks = {
       onFileReceived: async (mediaType: string, base64: string) => {
         const storageKey = StorageKeyGenerator.picture(`${session.id}:${targetMsg.id}`)
@@ -164,45 +161,89 @@ export async function orchestrateGeneration(
       },
     }
 
-    for await (const chunk of stream) {
-      const result = await processStreamChunk(chunk, processorState, streamCallbacks)
-      processorState = result.state
+    let processorState = createInitialState(fallbackToolCallPart ? [fallbackToolCallPart] : undefined)
 
-      if (result.skipUpdate) {
-        if (result.statusChunk && result.statusChunk.type === 'status') {
-          targetMsg = {
-            ...targetMsg,
-            status: result.statusChunk.status ? [result.statusChunk.status] : [],
+    for (let attempt = 1; attempt <= RETRY_CONFIG.MAX_ATTEMPTS; attempt++) {
+      // Reset state for each retry attempt (keep fallback tool call part on first attempt only)
+      if (attempt > 1) {
+        processorState = createInitialState()
+      }
+
+      const stream = model.chatStream(coreMessages, chatOptions) as AsyncGenerator<ModelStreamPart<ToolSet>>
+
+      for await (const chunk of stream) {
+        const result = await processStreamChunk(chunk, processorState, streamCallbacks)
+        processorState = result.state
+
+        if (result.skipUpdate) {
+          if (result.statusChunk && result.statusChunk.type === 'status') {
+            targetMsg = {
+              ...targetMsg,
+              status: result.statusChunk.status ? [result.statusChunk.status] : [],
+            }
+            updateStreamingCache(sessionId, targetMsg)
           }
+          continue
+        }
+
+        const nextMsg: Message = {
+          ...targetMsg,
+          contentParts: [...infoParts, ...processorState.contentParts],
+        }
+
+        const textLength = getMessageText(nextMsg, true, true).length
+        if (!firstTokenLatency && textLength > 0) {
+          firstTokenLatency = Date.now() - startTime
+        }
+
+        targetMsg = {
+          ...nextMsg,
+          status: textLength > 0 ? [] : nextMsg.status,
+          firstTokenLatency,
+        }
+
+        const shouldPersist = Date.now() - lastPersistTimestamp >= persistInterval
+        if (shouldPersist) {
+          void persistStreamingMessage(sessionId, targetMsg)
+        } else {
           updateStreamingCache(sessionId, targetMsg)
         }
-        continue
+        if (shouldPersist) {
+          lastPersistTimestamp = Date.now()
+        }
       }
 
-      const nextMsg: Message = {
-        ...targetMsg,
-        contentParts: [...infoParts, ...processorState.contentParts],
+      // Check if provider returned empty content
+      if (!isEmptyCompletion(processorState.contentParts)) {
+        break // Non-empty response — proceed to save
       }
 
-      const textLength = getMessageText(nextMsg, true, true).length
-      if (!firstTokenLatency && textLength > 0) {
-        firstTokenLatency = Date.now() - startTime
-      }
+      console.warn(
+        `[empty-completion] Provider returned empty response on attempt ${attempt}/${RETRY_CONFIG.MAX_ATTEMPTS}`
+      )
 
-      targetMsg = {
-        ...nextMsg,
-        status: textLength > 0 ? [] : nextMsg.status,
-        firstTokenLatency,
-      }
-
-      const shouldPersist = Date.now() - lastPersistTimestamp >= persistInterval
-      if (shouldPersist) {
-        void persistStreamingMessage(sessionId, targetMsg)
-      } else {
+      if (attempt < RETRY_CONFIG.MAX_ATTEMPTS) {
+        // Show retry indicator in the UI
+        targetMsg = {
+          ...targetMsg,
+          status: [
+            {
+              type: 'retrying',
+              attempt,
+              maxAttempts: RETRY_CONFIG.MAX_ATTEMPTS,
+              error: 'Empty response from provider',
+            },
+          ],
+        }
         updateStreamingCache(sessionId, targetMsg)
-      }
-      if (shouldPersist) {
-        lastPersistTimestamp = Date.now()
+
+        const delay = RETRY_CONFIG.INITIAL_DELAY_MS * Math.pow(RETRY_CONFIG.BACKOFF_FACTOR, attempt - 1)
+        await abortableDelay(delay, chatSignal)
+      } else {
+        console.error(
+          `[empty-completion] All ${RETRY_CONFIG.MAX_ATTEMPTS} attempts returned empty response`
+        )
+        // All retries exhausted — fall through and save the empty result
       }
     }
 
