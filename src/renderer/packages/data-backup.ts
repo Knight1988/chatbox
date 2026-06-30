@@ -124,6 +124,12 @@ export async function restoreFromBackupJson(jsonText: string): Promise<void> {
     false
   )
 
+  // Determine whether the backup included API keys/credentials
+  const exportedItems: ExportDataItem[] = Array.isArray(importData['__exported_items'])
+    ? importData['__exported_items']
+    : []
+  const backupIncludedKeys = exportedItems.includes(ExportDataItem.Key)
+
   const entriesToImport = Object.entries(importData).filter(
     ([key]) =>
       key !== StorageKey.ChatSessionsList && key !== StorageKey.ConfigVersion && !key.startsWith('__')
@@ -134,7 +140,53 @@ export async function restoreFromBackupJson(jsonText: string): Promise<void> {
     : undefined
 
   for (const [key, value] of entriesToImport) {
-    await storage.setItemNow(key, value)
+    if (key === StorageKey.Settings && !backupIncludedKeys) {
+      // The backup was exported without credentials — preserve the user's existing
+      // API keys, access keys, secret keys, session tokens, OAuth credentials, and
+      // license key so they are not wiped out by the restore.
+      const currentSettings = await storage.getItem<Settings | null>(StorageKey.Settings, null)
+      const importedSettings = value as Settings
+
+      if (currentSettings) {
+        // Preserve top-level licenseKey if the backup doesn't have one
+        if (!importedSettings.licenseKey && currentSettings.licenseKey) {
+          importedSettings.licenseKey = currentSettings.licenseKey
+        }
+
+        // Preserve per-provider credentials that are missing from the backup
+        if (currentSettings.providers) {
+          importedSettings.providers = importedSettings.providers ?? {}
+          for (const [providerId, currentProvider] of Object.entries(currentSettings.providers)) {
+            const importedProvider = importedSettings.providers[providerId]
+            if (importedProvider) {
+              // Provider exists in import — fill in missing credential fields
+              if (!importedProvider.apiKey && currentProvider.apiKey) {
+                importedProvider.apiKey = currentProvider.apiKey
+              }
+              if (!importedProvider.accessKey && currentProvider.accessKey) {
+                importedProvider.accessKey = currentProvider.accessKey
+              }
+              if (!importedProvider.secretKey && currentProvider.secretKey) {
+                importedProvider.secretKey = currentProvider.secretKey
+              }
+              if (!importedProvider.sessionToken && currentProvider.sessionToken) {
+                importedProvider.sessionToken = currentProvider.sessionToken
+              }
+              if (!importedProvider.oauth && currentProvider.oauth) {
+                importedProvider.oauth = currentProvider.oauth
+              }
+            } else {
+              // Provider not in backup at all — keep the user's existing entry
+              importedSettings.providers[providerId] = currentProvider
+            }
+          }
+        }
+      }
+
+      await storage.setItemNow(key, importedSettings)
+    } else {
+      await storage.setItemNow(key, value)
+    }
   }
 
   if (importedChatSessions) {

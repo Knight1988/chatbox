@@ -22,6 +22,7 @@ import platform from '@/platform'
 import storage, { StorageKey } from '@/storage'
 import { migrateOnData } from '@/stores/migration'
 import { settingsStore, useSettingsStore } from '@/stores/settingsStore'
+import { restoreFromBackupJson } from '@/packages/data-backup'
 
 interface Props {
   settingsEdit: Settings
@@ -205,38 +206,9 @@ function ExportAndImport(props: { onCancel: () => void }) {
           if (typeof result !== 'string') {
             throw new Error('FileReader result is not string')
           }
-          const importData = JSON.parse(result)
-          // 如果导入数据中包含了老的版本号，应该仅仅针对老的版本号进行迁移
-          await migrateOnData(
-            {
-              getData: async (key, defaultValue) => {
-                return importData[key] || defaultValue
-              },
-              setData: async (key, value) => {
-                importData[key] = value
-              },
-              setAll: async (data) => {
-                Object.assign(importData, data)
-              },
-            },
-            false
-          )
-
-          const previousData = await storage.getAll()
-          // FIXME: 这里缺少了数据校验
-          await storage.setAll({
-            ...previousData, // 有时候 importData 在导出时没有包含一些数据，这些数据应该保持原样
-            ...importData,
-            [StorageKey.ChatSessionsList]: uniqBy(
-              [
-                ...(previousData[StorageKey.ChatSessionsList] || []),
-                ...(importData[StorageKey.ChatSessionsList] || []),
-              ],
-              'id'
-            ),
-          })
-          props.onCancel() // 导出成功后立即关闭设置窗口，防止用户点击保存、导致设置数据被覆盖
-          platform.relaunch() // 重启应用以生效
+          // restoreFromBackupJson handles migration, credential preservation,
+          // session merging, and relaunch — no need to duplicate that logic here.
+          await restoreFromBackupJson(result)
         } catch (err) {
           setImportTips(errTip)
 

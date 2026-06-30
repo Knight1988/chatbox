@@ -446,47 +446,9 @@ const ImportExportDataSection = () => {
           if (typeof result !== 'string') {
             throw new Error('FileReader result is not string')
           }
-          const importData = JSON.parse(result)
-          // 如果导入数据中包含了老的版本号，应该仅仅针对老的版本号进行迁移
-          await migrateOnData(
-            {
-              getData: (key, defaultValue) => Promise.resolve(importData[key] ?? defaultValue),
-              setData: (key, value) => {
-                importData[key] = value
-                return Promise.resolve()
-              },
-              setAll: (data) => {
-                Object.assign(importData, data)
-                return Promise.resolve()
-              },
-            },
-            false
-          )
-
-          const entriesToImport = Object.entries(importData).filter(
-            ([key]) => key !== StorageKey.ChatSessionsList && key !== StorageKey.ConfigVersion && !key.startsWith('__')
-          )
-
-          const importedChatSessions = Array.isArray(importData[StorageKey.ChatSessionsList])
-            ? importData[StorageKey.ChatSessionsList]
-            : undefined
-
-          for (const [key, value] of entriesToImport) {
-            await storage.setItemNow(key, value)
-          }
-
-          if (importedChatSessions) {
-            const previousChatSessions = await storage.getItem(StorageKey.ChatSessionsList, [])
-
-            await storage.setItemNow(
-              StorageKey.ChatSessionsList,
-              uniqBy([...previousChatSessions, ...importedChatSessions], 'id')
-            )
-          }
-
-          // 由于即将重启应用，这里不需要清理loading状态
-          // props.onCancel() // 导入成功后立即关闭设置窗口，防止用户点击保存、导致设置数据被覆盖
-          platform.relaunch() // 重启应用以生效
+          // restoreFromBackupJson handles migration, credential preservation,
+          // session merging, and relaunch — no need to duplicate that logic here.
+          await restoreFromBackupJson(result)
         } catch (err) {
           setImportTips(errTip)
           setIsImporting(false)
