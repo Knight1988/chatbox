@@ -1,5 +1,5 @@
 import * as Sentry from '@sentry/react'
-import { AIProviderNoImplementedPaintError, ApiError, BaseError, NetworkError } from '@shared/models/errors'
+import { AIProviderNoImplementedPaintError, ApiError, BaseError, ChatboxAIAPIError, NetworkError } from '@shared/models/errors'
 import type { Message, ModelProvider, Session, SessionSettings, SessionType, Settings } from '@shared/types'
 import { ModelProviderEnum } from '@shared/types'
 import { identity, pickBy } from 'lodash'
@@ -114,9 +114,38 @@ export async function initializeTargetMessage(
  * Handle generation error and return updated message with error info
  */
 export function handleGenerationError(err: unknown, targetMsg: Message, settings: SessionSettings): Message {
-  const error = !(err instanceof Error) ? new Error(`${err}`) : err
+  let error = !(err instanceof Error) ? new Error(`${err}`) : err
 
   if (
+    !(error instanceof ApiError || error instanceof NetworkError || error instanceof AIProviderNoImplementedPaintError || error instanceof ChatboxAIAPIError)
+  ) {
+    Sentry.captureException(error)
+    // Classify DOMException AbortError (e.g. timeout abort, SSL rejection)
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      error = new ApiError('Request was aborted. This may be caused by a timeout or connection issue.')
+    } else {
+      // Classify network-like errors so they match the "Network Error:" prefix pattern
+      const msg = error.message.toLowerCase()
+      if (
+        msg.includes('fetch') ||
+        msg.includes('econnrefused') ||
+        msg.includes('network') ||
+        msg.includes('socket') ||
+        msg.includes('ssl') ||
+        msg.includes('certificate') ||
+        msg.includes('dns')
+      ) {
+        let host = ''
+        try {
+          host = new URL(settings.provider || '').origin
+        } catch {}
+        error = new NetworkError(error.message, host)
+      } else {
+        // Wrap as ApiError so the "API Error:" prefix is present and tips can render
+        error = new ApiError(error.message)
+      }
+    }
+  } else if (
     !(error instanceof ApiError || error instanceof NetworkError || error instanceof AIProviderNoImplementedPaintError)
   ) {
     Sentry.captureException(error)
@@ -138,6 +167,7 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
         aiProvider: settings.provider,
         host: error instanceof NetworkError ? error.host : undefined,
         responseBody: error instanceof ApiError ? error.responseBody : undefined,
+        httpStatusCode: error instanceof ApiError ? error.httpStatusCode : undefined,
       },
       identity
     ),

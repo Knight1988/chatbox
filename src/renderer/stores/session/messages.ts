@@ -238,6 +238,12 @@ export async function submitNewUserMessage(
       contentParts: [{ type: 'text', text: '' }],
       errorCode,
       error: `${error.message}`, // 这么写是为了避免类型问题
+      errorExtra: {
+        aiProvider: settings.provider,
+        ...(error instanceof NetworkError ? { host: error.host } : {}),
+        ...(error instanceof ApiError && error.responseBody ? { responseBody: error.responseBody } : {}),
+        ...(error instanceof ApiError && error.httpStatusCode ? { httpStatusCode: error.httpStatusCode } : {}),
+      },
       status: [],
     }
     if (needGenerating) {
