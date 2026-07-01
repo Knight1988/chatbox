@@ -1,6 +1,6 @@
 import { buildContext } from '@shared/context'
 import { getModel } from '@shared/models'
-import { ChatboxAIAPIError } from '@shared/models/errors'
+import { ApiError, ChatboxAIAPIError } from '@shared/models/errors'
 import { RETRY_CONFIG, abortableDelay, isEmptyCompletion } from '@shared/models/abstract-ai-sdk'
 import type { ChatStreamOptions, ModelStreamPart } from '@shared/models/types'
 import { type Message, type MessageContentParts, ModelProviderEnum } from '@shared/types'
@@ -31,9 +31,9 @@ import {
   trackGenerateEvent,
 } from './utils'
 
-// 5-minute wall-clock deadline for any single LLM chat request.
+// 15-minute wall-clock deadline for any single LLM chat request.
 // Long reasoning / large-context calls can otherwise hang the UI.
-const LLM_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+const LLM_REQUEST_TIMEOUT_MS = 15 * 60 * 1000
 
 export async function orchestrateGeneration(
   sessionId: string,
@@ -268,12 +268,24 @@ export async function orchestrateGeneration(
     appleAppStore.tickAfterMessageGenerated()
   } catch (err: unknown) {
     if (controller.signal.aborted) {
+      // User explicitly cancelled — silently discard, no error shown
       targetMsg = {
         ...targetMsg,
         generating: false,
         cancel: undefined,
         status: [],
       }
+      await persistStreamingMessage(sessionId, targetMsg, { refreshCounting: true })
+      return
+    }
+
+    if (timeoutController.signal.aborted) {
+      // Wall-clock timeout fired — show a clear timeout error
+      targetMsg = handleGenerationError(
+        new ApiError('Request timed out after 15 minutes. The model may be overloaded or the response was too large.'),
+        targetMsg,
+        settings
+      )
       await persistStreamingMessage(sessionId, targetMsg, { refreshCounting: true })
       return
     }
