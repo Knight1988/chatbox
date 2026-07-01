@@ -294,7 +294,6 @@
     "zustand": "^5.0.6"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "^0.0.62",
     "@libsql/client": "^0.15.6",
     "@lobehub/icons": "^4.0.2",
     "@mastra/core": "^0.13.2",
@@ -320,7 +319,6 @@
     "ofetch": "^1.0.1",
     "officeparser": "5.0.0",
     "sanitize-filename": "^1.6.3",
-    "shiki": "^4.3.0",
     "uuid": "^9.0.0"
   },
   "browserslist": [],
