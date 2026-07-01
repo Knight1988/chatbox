@@ -35,7 +35,6 @@ export const SearchResultItemSchema = z.object({
   title: z.string(),
   link: z.string(),
   snippet: z.string(),
-  rawContent: z.string().nullable().optional(),
 })
 
 export const SearchResultSchema = z.object({
@@ -47,9 +46,22 @@ export const MessageFileSchema = z.object({
   id: z.string(),
   name: z.string(),
   fileType: z.string(),
+  parserType: z.string().optional(),
   url: z.string().optional(),
   storageKey: z.string().optional(),
+  localPath: z.string().optional(),
   chatboxAIFileUUID: z.string().optional(),
+  ragMode: z.enum(['inline', 'session-retrieval']).optional(),
+  sessionAttachmentId: z.number().optional(),
+  sessionAttachmentAvailability: z.enum(['allowed', 'blocked']).optional(),
+  sessionAttachmentIndexStatus: z.enum(['pending', 'indexing', 'ready', 'failed']).optional(),
+  sessionAttachmentBlockedReason: z.string().optional(),
+  sessionAttachmentWarningReason: z.string().optional(),
+  sessionAttachmentStatus: z.enum(['pending', 'indexing', 'ready', 'failed']).optional(),
+  sessionAttachmentChunkCount: z.number().optional(),
+  sessionAttachmentIndexingStage: z.enum(['queued', 'chunking', 'embedding', 'finalizing', 'ready']).optional(),
+  sessionAttachmentTotalChunks: z.number().optional(),
+  sessionAttachmentEmbeddedChunks: z.number().optional(),
   tokenCountMap: TokenCountMapSchema.optional().catch(undefined),
   tokenCalculatedAt: TokenCalculatedAtSchema,
   lineCount: z.number().optional(),
@@ -225,7 +237,7 @@ export const CompactionPointSchema = z.object({
 })
 
 // Session schemas
-export const SessionTypeSchema = z.enum(['chat', 'picture'])
+export const SessionTypeSchema = z.enum(['chat', 'picture', 'guide'])
 
 export const MessageForkListSchema = z.object({
   id: z.string(),
@@ -281,6 +293,17 @@ export const SessionMetaSchema = SessionSchema.pick({
   type: true,
 })
 
+export const SessionMetaRecordSchema = SessionMetaSchema.extend({
+  sortOrder: z.number(),
+  createdAt: z.number(),
+})
+
+export const SessionMetaPageSchema = z.object({
+  items: z.array(SessionMetaRecordSchema),
+  nextCursor: z.number().nullable(),
+  total: z.number(),
+})
+
 export const SessionThreadBriefSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -314,5 +337,7 @@ export type SessionType = z.infer<typeof SessionTypeSchema>
 export type CompactionPoint = z.infer<typeof CompactionPointSchema>
 export type Session = z.infer<typeof SessionSchema>
 export type SessionMeta = z.infer<typeof SessionMetaSchema>
+export type SessionMetaRecord = z.infer<typeof SessionMetaRecordSchema>
+export type SessionMetaPage = z.infer<typeof SessionMetaPageSchema>
 export type SessionThread = z.infer<typeof SessionThreadSchema>
 export type SessionThreadBrief = z.infer<typeof SessionThreadBriefSchema>

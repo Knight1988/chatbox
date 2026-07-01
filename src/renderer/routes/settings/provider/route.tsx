@@ -3,12 +3,13 @@ import { SystemProviders } from '@shared/defaults'
 import type { ModelProviderEnum, ProviderInfo, ProviderSettings } from '@shared/types'
 import { createFileRoute, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
 import { zodValidator } from '@tanstack/zod-adapter'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
 import { AddProviderModal } from '@/components/settings/provider/AddProviderModal'
 import { ImportProviderModal } from '@/components/settings/provider/ImportProviderModal'
 import { ProviderList } from '@/components/settings/provider/ProviderList'
+import ProviderSpotlight, { providerSpotlight } from '@/components/settings/provider/ProviderSpotlight'
 import { useProviderImport } from '@/hooks/useProviderImport'
 import { useIsSmallScreen } from '@/hooks/useScreenChange'
 import useVersion from '@/hooks/useVersion'
@@ -36,23 +37,42 @@ export function RouteComponent() {
   const providersMap = useSettingsStore((state) => state.providers)
   const { isExceeded } = useVersion()
 
-  const providers = useMemo<ProviderInfo[]>(
-    () =>
-      [
-        ...SystemProviders().filter(
-          (p) =>
-            p.id !== 'chatbox-ai' && // Chatbox AI is now a top-level menu item
-            !(isExceeded && p.name.toLocaleLowerCase().match(/openai|claude|gemini/i))
-        ),
-        ...(customProviders || []),
-      ].map((p) => ({
-        ...p,
-        ...(providersMap?.[p.id] || {}),
-      })),
-    [customProviders, isExceeded, providersMap]
-  )
+  const providers = useMemo<ProviderInfo[]>(() => {
+    const systemProviders = SystemProviders().filter(
+      (p) => !(isExceeded && p.name.toLocaleLowerCase().match(/openai|claude|gemini/i))
+    )
+    // Put ChatboxAI first
+    const chatboxAI = systemProviders.find((p) => p.id === 'chatbox-ai')
+    const others = systemProviders.filter((p) => p.id !== 'chatbox-ai')
+    return [...(chatboxAI ? [chatboxAI] : []), ...others, ...(customProviders || [])].map((p) => ({
+      ...p,
+      ...(providersMap?.[p.id] || {}),
+    }))
+  }, [customProviders, isExceeded, providersMap])
+
+  const allSystemProviders = useMemo(() => {
+    return providers.filter((p) => !p.isCustom)
+  }, [providers])
 
   const [newProviderModalOpened, setNewProviderModalOpened] = useState(false)
+
+  const handleOpenSpotlight = useCallback(() => {
+    providerSpotlight.open()
+  }, [])
+
+  const handleAddCustomProvider = useCallback(() => {
+    setNewProviderModalOpened(true)
+  }, [])
+
+  const handleSelectProvider = useCallback(
+    (providerId: string) => {
+      navigate({
+        to: providerId === 'chatbox-ai' ? '/settings/provider/chatbox-ai' : '/settings/provider/$providerId',
+        params: { providerId },
+      })
+    },
+    [navigate]
+  )
 
   // Import hook
   const {
@@ -127,12 +147,7 @@ export function RouteComponent() {
   return (
     <Flex h="100%" w="100%">
       {(!isSmallScreen || routerState.location.pathname === '/settings/provider') && (
-        <ProviderList
-          providers={providers}
-          onAddProvider={() => setNewProviderModalOpened(true)}
-          onImportProvider={handleClipboardImport}
-          isImporting={isImporting}
-        />
+        <ProviderList providers={providers} onAddProvider={handleOpenSpotlight} />
       )}
       {!(isSmallScreen && routerState.location.pathname === '/settings/provider') && (
         <Box flex="1 1 75%" p="md" className="overflow-auto">
@@ -147,6 +162,14 @@ export function RouteComponent() {
         onClose={handleImportModalClose}
         importedConfig={importedConfig}
         existingProvider={existingProvider}
+      />
+
+      <ProviderSpotlight
+        allSystemProviders={allSystemProviders}
+        onSelectProvider={handleSelectProvider}
+        onAddCustomProvider={handleAddCustomProvider}
+        onImportProvider={handleClipboardImport}
+        isImporting={isImporting}
       />
     </Flex>
   )

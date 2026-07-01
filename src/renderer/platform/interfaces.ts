@@ -1,7 +1,10 @@
 /** biome-ignore-all lint/suspicious/noExplicitAny: <any> */
 import type { Config, Language, Settings, ShortcutSetting } from '@shared/types'
 import type { ImageGenerationStorage } from '@/storage/ImageGenerationStorage'
+import type { SessionMetaStorage } from '@/storage/SessionMetaStorage'
+import type { TaskSessionStorage } from '@/storage/TaskSessionStorage'
 import type { KnowledgeBaseController } from './knowledge-base/interface'
+import type { SessionAttachmentRagController } from './session-attachment-rag/interface'
 
 export type PlatformType = 'web' | 'desktop' | 'mobile'
 
@@ -30,6 +33,15 @@ export interface Platform extends Storage {
   onWindowShow(callback: () => void): () => void
   onWindowFocused(callback: () => void): () => void
   onUpdateDownloaded(callback: () => void): () => void
+  onUpdaterChecking?(callback: () => void): () => void
+  onUpdaterAvailable?(callback: (data: { version: string }) => void): () => void
+  onUpdaterNotAvailable?(callback: () => void): () => void
+  onUpdaterProgress?(
+    callback: (data: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void
+  ): () => void
+  onUpdaterDownloaded?(callback: (data: { version: string }) => void): () => void
+  onUpdaterError?(callback: (data: { message: string }) => void): () => void
+  checkForUpdate?(): Promise<{ started: boolean }>
   onNavigate?(callback: (path: string) => void): () => void
   openLink(url: string): Promise<void>
   getDeviceName(): Promise<string>
@@ -68,6 +80,8 @@ export interface Platform extends Storage {
   ensureAutoLaunch(enable: boolean): Promise<void>
 
   parseFileLocally(file: File): Promise<{ key?: string; isSupported: boolean }>
+  getLocalFilePath(file: File): string
+  readLocalFileContent?(filePath: string): Promise<string | null>
 
   // Parse file using MinerU service (Desktop only)
   parseFileWithMineru?(
@@ -85,8 +99,44 @@ export interface Platform extends Storage {
   installUpdate(): Promise<void>
 
   getKnowledgeBaseController(): KnowledgeBaseController
+  getSessionAttachmentRagController(): SessionAttachmentRagController
 
   getImageGenerationStorage(): ImageGenerationStorage
+
+  getTaskSessionStorage(): TaskSessionStorage
+
+  getSessionMetaStorage(): SessionMetaStorage
+
+  // Sandbox operations (Desktop only)
+  sandboxInit?(config: { workingDirectory: string }): Promise<{ success: boolean; error?: string }>
+  sandboxExec?(params: {
+    command: string
+    timeout?: number
+  }): Promise<{ stdout: string; stderr: string; exitCode: number }>
+  sandboxRead?(params: { filePath: string }): Promise<{ success: boolean; content?: string; error?: string }>
+  sandboxWrite?(params: { filePath: string; content: string }): Promise<{ success: boolean; error?: string }>
+  sandboxEdit?(params: {
+    filePath: string
+    search: string
+    replace: string
+  }): Promise<{ success: boolean; error?: string }>
+  sandboxLs?(params: { dirPath: string }): Promise<{ success: boolean; content?: string; error?: string }>
+  sandboxGrep?(params: {
+    pattern: string
+    dirPath?: string
+    include?: string
+  }): Promise<{ success: boolean; content?: string; error?: string }>
+  sandboxFind?(params: {
+    dirPath: string
+    pattern?: string
+  }): Promise<{ success: boolean; content?: string; error?: string }>
+  sandboxKill?(): Promise<{ killed: boolean }>
+  sandboxReset?(): Promise<{ success: boolean; error?: string }>
+  sandboxStatus?(): Promise<{ state: string; workingDirectory?: string | null; platform?: string }>
+  sandboxCheckAvailability?(): Promise<{ available: boolean; reason?: string }>
+
+  // Directory dialog (Desktop only)
+  openDirectoryDialog?(): Promise<{ canceled: boolean; path?: string }>
 
   // window controls
   minimize(): Promise<void>

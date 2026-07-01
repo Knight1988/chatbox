@@ -33,8 +33,8 @@ export const DEFAULT_DOCUMENT_PARSER_CONFIG: DocumentParserConfig = {
 
 export const ProviderModelInfoSchema = z.object({
   modelId: z.string(),
-  type: z.enum(['chat', 'embedding', 'rerank']).optional().catch(undefined),
-  apiStyle: z.enum(['google', 'openai', 'anthropic']).optional().catch(undefined),
+  type: z.enum(['chat', 'embedding', 'rerank', 'image']).optional().catch(undefined),
+  apiStyle: z.enum(['google', 'openai', 'openai-responses', 'anthropic']).optional().catch(undefined),
   nickname: z.string().optional().catch(undefined),
   labels: z.array(z.string()).optional().catch([]),
   capabilities: z
@@ -151,9 +151,10 @@ export const SessionSettingsSchema = GlobalSessionSettingsSchema.extend({
 })
 
 const UnifiedTokenUsageDetailSchema = z.object({
-  type: z.string(), // "plan" | "trial" | ... (more types in future)
+  type: z.string(), // "plan" | "trial" | "invitation_reward" | ... (more types in future)
   token_usage: z.number(),
   token_limit: z.number(),
+  expires_at: z.string().nullish(),
 })
 
 const ChatboxAILicenseDetailSchema = z.object({
@@ -214,7 +215,6 @@ const ShortcutSettingSchema = z.object({
   sessionListNavNext: z.string(),
   sessionListNavPrev: z.string(),
   sessionListNavTargetIndex: z.string(),
-  messageListRefreshContext: z.string(),
   dialogOpenSearch: z.string(),
   optionNavUp: z.string(),
   optionNavDown: z.string(),
@@ -335,10 +335,13 @@ export const SettingsSchema = GlobalSessionSettingsSchema.extend({
   licenseKey: z.string().optional(),
   licenseInstances: z.record(z.string(), z.string()).optional().catch(undefined),
   licenseDetail: ChatboxAILicenseDetailSchema.optional().catch(undefined),
+  licensePlanName: z.string().optional(),
   licenseActivationMethod: z.enum(['login', 'manual']).optional(),
+  hasExpiredLicense: z.boolean().default(false),
   lastSelectedLicenseByUser: z.record(z.string(), z.string()).optional().catch(undefined),
   // 在 licensekeyview UI中显示/记忆的key，以免用户使用 login 方式后老 key 被清除，他也不记得
   memorizedManualLicenseKey: z.string().optional(),
+  chatboxAIDesktopPromptDismissed: z.boolean().default(false),
 
   // chat settings
   showWordCount: z.boolean().optional().catch(undefined),

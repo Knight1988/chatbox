@@ -59,7 +59,7 @@ import { useOAuthProviders } from '@/hooks/useOAuthProviders'
 import { enrichModelsFromRegistry, forceRefreshRegistry, useModelRegistryVersion } from '@/packages/model-registry'
 import { getModelSettingUtil } from '@/packages/model-setting-utils'
 import platform from '@/platform'
-import { useLanguage, useProviderSettings, useSettingsStore } from '@/stores/settingsStore'
+import { settingsStore, useLanguage, useProviderSettings, useSettingsStore } from '@/stores/settingsStore'
 import { add as addToast } from '@/stores/toastActions'
 import { type ModelTestState, testModelCapabilities } from '@/utils/model-tester'
 
@@ -85,6 +85,7 @@ const BUILTIN_API_HOST_PROVIDERS = new Set<string>([
   ModelProviderEnum.MoonshotCN,
   ModelProviderEnum.Ollama,
   ModelProviderEnum.LMStudio,
+  ModelProviderEnum.VercelAIGateway,
 ])
 
 const OAUTH_ONLY_PROVIDERS = new Set<string>([ModelProviderEnum.QwenPortal])
@@ -157,11 +158,12 @@ function ProviderSettings({ providerId }: { providerId: string }) {
 
   const navigate = useNavigate()
   const { t } = useTranslation()
-  const { setSettings, ...settings } = useSettingsStore((state) => state)
+  const setSettings = useSettingsStore((state) => state.setSettings)
+  const customProviders = useSettingsStore((state) => state.customProviders)
 
   const language = useLanguage()
 
-  const baseInfo = [...SystemProviders(), ...(settings.customProviders || [])].find((p) => p.id === providerId)
+  const baseInfo = [...SystemProviders(), ...(customProviders || [])].find((p) => p.id === providerId)
 
   const { providerSettings, setProviderSettings } = useProviderSettings(providerId)
   const oauthProviderId = toOAuthProviderId(providerId)
@@ -424,7 +426,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
     const finalState = await testModelCapabilities({
       providerId,
       modelId: model.modelId,
-      settings,
+      settings: settingsStore.getState(),
       configs,
       dependencies,
       onStateChange: (state) => {
@@ -494,7 +496,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
             confirmButtonColor="chatbox-error"
             onConfirm={() => {
               setSettings({
-                customProviders: settings.customProviders?.filter((p) => p.id !== baseInfo.id),
+                customProviders: customProviders?.filter((p) => p.id !== baseInfo.id),
               })
               navigate({ to: '/settings/provider', replace: true })
             }}
@@ -532,7 +534,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
                 value={baseInfo.name}
                 onChange={(e) => {
                   setSettings({
-                    customProviders: settings.customProviders?.map((p) =>
+                    customProviders: customProviders?.map((p) =>
                       p.id === baseInfo.id ? { ...p, name: e.currentTarget.value } : p
                     ),
                   })
@@ -548,7 +550,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
                 value={baseInfo.type}
                 onChange={(value) => {
                   setSettings({
-                    customProviders: settings.customProviders?.map((p) =>
+                    customProviders: customProviders?.map((p) =>
                       p.id === baseInfo.id ? { ...p, type: value as ModelProviderType } : p
                     ),
                   })
@@ -901,11 +903,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
 
             <Flex gap="xs" align="center">
               <Tooltip
-                disabled={
-                  !!providerSettings?.accessKey &&
-                  !!providerSettings?.secretKey &&
-                  displayModels.length > 0
-                }
+                disabled={!!providerSettings?.accessKey && !!providerSettings?.secretKey && displayModels.length > 0}
                 label={
                   !providerSettings?.accessKey || !providerSettings?.secretKey
                     ? t('AWS Access Key ID and Secret Access Key are required to check connection')
@@ -916,11 +914,7 @@ function ProviderSettings({ providerId }: { providerId: string }) {
               >
                 <Button
                   size="sm"
-                  disabled={
-                    !providerSettings?.accessKey ||
-                    !providerSettings?.secretKey ||
-                    displayModels.length === 0
-                  }
+                  disabled={!providerSettings?.accessKey || !providerSettings?.secretKey || displayModels.length === 0}
                   loading={modelTestResult?.testing || false}
                   onClick={() => setShowTestModelSelector(true)}
                 >

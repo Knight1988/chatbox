@@ -8,9 +8,52 @@ import { getLogger } from '@/lib/utils'
 import { mcpController } from '@/packages/mcp/controller'
 import * as remote from '../packages/remote'
 import platform from '../platform'
+import { authInfoStore } from './authInfoStore'
 import { settingsStore, useSettingsStore } from './settingsStore'
 
 const log = getLogger('premium-actions')
+
+export function reconcileLoginLicenseState() {
+  const settings = settingsStore.getState()
+  if (settings.licenseActivationMethod !== 'login' || !settings.licenseKey) {
+    return false
+  }
+  if (authInfoStore.getState().getTokens()) {
+    return false
+  }
+
+  const licenseKey = settings.licenseKey
+  settingsStore.setState((state) => ({
+    licenseKey: '',
+    licenseDetail: undefined,
+    licensePlanName: undefined,
+    licenseActivationMethod: undefined,
+    licenseInstances: omit(state.licenseInstances, licenseKey),
+    hasExpiredLicense: false,
+    mcp: {
+      ...state.mcp,
+      enabledBuiltinServers: [],
+    },
+  }))
+  settings.mcp.enabledBuiltinServers.forEach((serverId) => {
+    mcpController.stopServer(serverId).catch(console.error)
+  })
+  remote.invalidateSessionRagConfigCache()
+  log.info('Cleared stale login license state because auth tokens are missing')
+  return true
+}
+
+export function initLoginLicenseStateReconciliation() {
+  reconcileLoginLicenseState()
+  return authInfoStore.subscribe(
+    (state) => (state.accessToken && state.refreshToken ? 'signed-in' : 'signed-out'),
+    (authState) => {
+      if (authState === 'signed-out') {
+        reconcileLoginLicenseState()
+      }
+    }
+  )
+}
 
 /**
  * 自动验证当前的 license 是否有效，如果无效则清除相关数据
@@ -24,7 +67,9 @@ export function useAutoValidate(): boolean {
       licenseKey: '',
       licenseInstances: omit(state.licenseInstances, state.licenseKey || ''),
       licenseDetail: undefined,
+      licensePlanName: undefined,
       licenseActivationMethod: undefined,
+      hasExpiredLicense: true,
     }))
   }
   useEffect(() => {
@@ -81,6 +126,7 @@ export async function deactivate(clearLoginState = true) {
   settingsStore.setState((settings) => ({
     licenseKey: '',
     licenseDetail: undefined,
+    licensePlanName: undefined,
     licenseActivationMethod: undefined,
     licenseInstances: omit(settings.licenseInstances, settings.licenseKey || ''),
     mcp: {
@@ -114,6 +160,7 @@ export async function activate(
   method: 'login' | 'manual' = 'manual',
   options?: { pageName?: string }
 ) {
+  console.log('Enter acticate')
   const pageName = options?.pageName ?? JK_PAGE_NAMES.SETTING_PAGE
   const shouldTrackKeyVerifyEvent = method !== 'login'
   const settings = settingsStore.getState()
@@ -151,7 +198,17 @@ export async function activate(
   const licenseDetailResponse = await remote.getLicenseDetailRealtime({ licenseKey })
   // 如果获取详情返回错误（如过期、额度用尽），返回错误码
   if (licenseDetailResponse.error) {
+    console.log(`licenseDetailResponse.error: ${licenseDetailResponse.error.code}`)
     const error = licenseDetailResponse.error.code || 'license_error'
+    // if expired
+    if (error === 'expired' || error === 'expired_license') settingsStore.setState({ hasExpiredLicense: true })
+    // 即使有错误，也保存 license 详情数据（quota_exceeded 等错误仍会返回 data）
+    if (licenseDetailResponse.data) {
+      settingsStore.setState({
+        licenseDetail: licenseDetailResponse.data,
+        licensePlanName: licenseDetailResponse.data.name,
+      })
+    }
     if (shouldTrackKeyVerifyEvent) {
       trackJkClickEvent(JK_EVENTS.KEY_VERIFY_FAILED, {
         pageName,
@@ -174,6 +231,7 @@ export async function activate(
       [licenseKey]: result.instanceId,
     },
     licenseDetail: licenseDetailResponse.data || undefined,
+    licensePlanName: licenseDetailResponse.data?.name,
     // 同步更新手动激活的 license key 显示值（用于设置页面输入框回显）
     ...(method === 'manual' ? { memorizedManualLicenseKey: licenseKey } : {}),
   }))

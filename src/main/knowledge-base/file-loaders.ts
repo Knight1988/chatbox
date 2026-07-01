@@ -1,14 +1,18 @@
 import { setTimeout } from 'node:timers/promises'
 import { MDocument } from '@mastra/rag'
 import { embedMany } from 'ai'
+import {
+  KNOWLEDGE_BASE_MAX_PARSED_CONTENT_SIZE,
+  KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR,
+} from '../../shared/knowledge-base'
 import { ChatboxAIAPIError } from '../../shared/models/errors'
-import type { DocumentParserConfig } from '../../shared/types/settings'
 import { rerank } from '../../shared/models/rerank'
+import type { DocumentParserConfig } from '../../shared/types/settings'
 import { sentry } from '../adapters/sentry'
 import { getLogger } from '../util'
 import { checkProcessingTimeouts, getDatabase, getVectorStore } from './db'
 import { getEmbeddingProvider, getRerankProvider } from './model-providers'
-import { getEffectiveParserConfig, parseFileWithRouter, type ParserFileMeta } from './parsers'
+import { getEffectiveParserConfig, type ParserFileMeta, parseFileWithRouter } from './parsers'
 
 const log = getLogger('knowledge-base:file-loaders')
 
@@ -60,6 +64,14 @@ async function parseFileToDocumentWithRouter(
 
   log.info(`[FILE] Parse completed for ${fileMeta.filename}, parser used: ${result.parserUsed}`)
 
+  const parsedContentByteLength = Buffer.byteLength(result.content, 'utf8')
+  if (parsedContentByteLength > KNOWLEDGE_BASE_MAX_PARSED_CONTENT_SIZE) {
+    log.info(
+      `[FILE] Parsed content too large: filename=${fileMeta.filename}, bytes=${parsedContentByteLength}, limit=${KNOWLEDGE_BASE_MAX_PARSED_CONTENT_SIZE}`
+    )
+    throw new Error(KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR)
+  }
+
   // Convert content to MDocument based on content type
   const document = MDocument.fromText(result.content)
   return { document, parserUsed: result.parserUsed }
@@ -101,8 +113,8 @@ export async function processFileWithMastra(
     // 2. Chunking
     const allChunks = await doc.chunk({
       strategy: 'recursive',
-      size: 512,
-      overlap: 50,
+      maxSize: 1200,
+      overlap: 150,
     })
 
     if (!allChunks || allChunks.length === 0) {
@@ -156,6 +168,8 @@ export async function processFileWithMastra(
     const firstEmbedding = await embedMany({
       model: embeddingInstance,
       values: [`filename: ${fileMeta.filename}\nchunk:\n${remainingChunks[0].text}`],
+      // Embeddings are billable; network-error retries could double-charge.
+      maxRetries: 0,
     })
     await vectorStore.createIndex({ indexName, dimension: firstEmbedding.embeddings[0].length })
 
@@ -179,6 +193,8 @@ export async function processFileWithMastra(
       const embeddingResult = await embedMany({
         model: embeddingInstance,
         values: batchTexts,
+        // Embeddings are billable; network-error retries could double-charge.
+        maxRetries: 0,
       })
 
       if (!embeddingResult.embeddings || embeddingResult.embeddings.length !== batchTexts.length) {
@@ -225,21 +241,30 @@ export async function processFileWithMastra(
       sql: 'UPDATE kb_file SET status = ?, processing_started_at = NULL WHERE id = ?',
       args: ['done', fileMeta.fileId],
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errMsg =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'object' &&
+            error !== null &&
+            'message' in error &&
+            typeof (error as Record<string, unknown>).message === 'string'
+          ? ((error as Record<string, unknown>).message as string)
+          : String(error)
     const duration = Date.now() - startTime
     log.error(`[FILE] File processing failed after ${duration}ms: ${fileMeta.filename} (id=${fileMeta.fileId})`, error)
 
     // Determine the operation type based on error message for better debugging
     let operation = 'file_processing'
-    if (error.message.includes('parse')) {
+    if (errMsg.includes('parse')) {
       operation = 'file_parsing'
-    } else if (error.message.includes('chunk')) {
+    } else if (errMsg.includes('chunk')) {
       operation = 'document_chunking'
-    } else if (error.message.includes('embedding')) {
+    } else if (errMsg.includes('embedding')) {
       operation = 'generate_embeddings'
-    } else if (error.message.includes('store') || error.message.includes('vector')) {
+    } else if (errMsg.includes('store') || errMsg.includes('vector')) {
       operation = 'vector_storage'
-    } else if (error.message.includes('vision') || error.message.includes('OCR') || error.message.includes('image')) {
+    } else if (errMsg.includes('vision') || errMsg.includes('OCR') || errMsg.includes('image')) {
       operation = 'image_ocr_processing'
     }
 
@@ -344,7 +369,7 @@ async function processPendingFiles() {
         })
       }
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     log.error('[FILE] Failed to process pending files:', error)
     sentry.withScope((scope) => {
       scope.setTag('component', 'knowledge-base-file')
@@ -361,7 +386,7 @@ export async function startWorkerLoop() {
   while (true) {
     try {
       await processPendingFiles()
-    } catch (e: any) {
+    } catch (e: unknown) {
       log.error('[FILE] Worker loop error:', e)
       sentry.withScope((scope) => {
         scope.setTag('component', 'knowledge-base-file')
@@ -384,6 +409,8 @@ export async function searchKnowledgeBase(kbId: number, query: string) {
     const embedding = await embedMany({
       model: embeddingInstance,
       values: [query],
+      // Embeddings are billable; network-error retries could double-charge.
+      maxRetries: 0,
     })
     const vectorStore = getVectorStore()
     const indexName = `kb_${kbId}`
@@ -435,8 +462,7 @@ export async function searchKnowledgeBase(kbId: number, query: string) {
       sentry.captureException(e)
     })
 
-    // TODO: user friendly error message
-    throw e
+    throw new Error(`Failed to search knowledge base (id: ${kbId}). Please try again later.`)
   }
 }
 

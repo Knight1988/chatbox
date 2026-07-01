@@ -27,6 +27,7 @@ import './definitions/perplexity'
 import './definitions/volcengine'
 import './definitions/chatglm'
 import './definitions/bedrock'
+import './definitions/vercel-ai-gateway'
 import {
   clearProviderRegistry,
   defineProvider,

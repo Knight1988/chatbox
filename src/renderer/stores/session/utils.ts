@@ -1,5 +1,5 @@
 import * as Sentry from '@sentry/react'
-import { AIProviderNoImplementedPaintError, ApiError, BaseError, ChatboxAIAPIError, NetworkError } from '@shared/models/errors'
+import { AIProviderNoImplementedPaintError, ApiError, BaseError, NetworkError, OCRError } from '@shared/models/errors'
 import type { Message, ModelProvider, Session, SessionSettings, SessionType, Settings } from '@shared/types'
 import { ModelProviderEnum } from '@shared/types'
 import { identity, pickBy } from 'lodash'
@@ -116,14 +116,21 @@ export async function initializeTargetMessage(
 export function handleGenerationError(err: unknown, targetMsg: Message, settings: SessionSettings): Message {
   let error = !(err instanceof Error) ? new Error(`${err}`) : err
 
+  const isExpectedOCRError = error instanceof OCRError && error.cause instanceof BaseError
+
   if (
-    !(error instanceof ApiError || error instanceof NetworkError || error instanceof AIProviderNoImplementedPaintError || error instanceof ChatboxAIAPIError)
+    !(
+      error instanceof ApiError ||
+      error instanceof NetworkError ||
+      error instanceof AIProviderNoImplementedPaintError ||
+      isExpectedOCRError
+    )
   ) {
     Sentry.captureException(error)
     // Classify DOMException AbortError (e.g. timeout abort, SSL rejection)
     if (error instanceof DOMException && error.name === 'AbortError') {
       error = new ApiError('Request was aborted. This may be caused by a timeout or connection issue.')
-    } else {
+    } else if (!(error instanceof OCRError)) {
       // Classify network-like errors so they match the "Network Error:" prefix pattern
       const msg = error.message.toLowerCase()
       if (
@@ -145,10 +152,6 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
         error = new ApiError(error.message)
       }
     }
-  } else if (
-    !(error instanceof ApiError || error instanceof NetworkError || error instanceof AIProviderNoImplementedPaintError)
-  ) {
-    Sentry.captureException(error)
   }
 
   let errorCode: number | undefined
@@ -156,18 +159,38 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
     errorCode = err.code
   }
 
+  const ocrError = error instanceof OCRError ? error : undefined
+  const causeError = ocrError?.cause
+
   return {
     ...targetMsg,
     generating: false,
     cancel: undefined,
-    errorCode,
+    errorCode: ocrError ? (causeError instanceof BaseError ? causeError.code : errorCode) : errorCode,
     error: `${error.message}`,
     errorExtra: pickBy(
       {
-        aiProvider: settings.provider,
-        host: error instanceof NetworkError ? error.host : undefined,
-        responseBody: error instanceof ApiError ? error.responseBody : undefined,
-        httpStatusCode: error instanceof ApiError ? error.httpStatusCode : undefined,
+        aiProvider: ocrError ? ocrError.ocrProvider : settings.provider,
+        host:
+          error instanceof NetworkError ? error.host : causeError instanceof NetworkError ? causeError.host : undefined,
+        responseBody:
+          error instanceof ApiError
+            ? error.responseBody
+            : causeError instanceof ApiError
+              ? causeError.responseBody
+              : undefined,
+        httpStatusCode:
+          error instanceof ApiError
+            ? error.statusCode
+            : causeError instanceof ApiError
+              ? causeError.statusCode
+              : undefined,
+        requestId:
+          error instanceof BaseError
+            ? error.requestId
+            : causeError instanceof BaseError
+              ? causeError.requestId
+              : undefined,
       },
       identity
     ),

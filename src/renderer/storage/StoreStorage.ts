@@ -1,6 +1,7 @@
-import { DebouncedFunc } from 'lodash'
+import type { DebouncedFunc } from 'lodash'
 import debounce from 'lodash/debounce'
 import { v4 as uuidv4 } from 'uuid'
+import { getBestEffortFileNativePath } from '@/utils/file-native-path'
 import BaseStorage from './BaseStorage'
 
 export enum StorageKey {
@@ -27,7 +28,7 @@ export const StorageKeyGenerator = {
     return `file:${sessionId}:${msgId}:${uuidv4()}`
   },
   fileUniqKey(file: File) {
-    return `file:${file.path || file.name}-${file.size}-${file.lastModified}`
+    return `file:${getBestEffortFileNativePath(file) || file.name}-${file.size}-${file.lastModified}`
   },
   linkUniqKey(url: string) {
     return `link:${url}`
@@ -35,11 +36,8 @@ export const StorageKeyGenerator = {
 }
 
 export default class StoreStorage extends BaseStorage {
-  constructor() {
-    super()
-  }
   public async getItem<T>(key: string, initialValue: T): Promise<T> {
-    let value: T = await super.getItem(key, initialValue)
+    const value: T = await super.getItem(key, initialValue)
 
     if (key === StorageKey.Configs && value === initialValue) {
       await super.setItemNow(key, initialValue) // 持久化初始生成的 uuid

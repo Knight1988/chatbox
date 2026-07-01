@@ -80,7 +80,7 @@ describe('settingsStore persistence', () => {
           isCustom: true,
         },
       ],
-      __version: 2,
+      __version: 4,
     }
 
     const { initSettingsStore, settingsStore } = await loadSettingsStoreModule(persistedSettings)
@@ -107,7 +107,7 @@ describe('settingsStore persistence', () => {
           apiKey: 'sk-claude',
         },
       },
-      __version: 2,
+      __version: 4,
     }
 
     const { initSettingsStore, settingsStore, mergeProviderSettings, mockStorage } =
@@ -145,7 +145,7 @@ describe('settingsStore persistence', () => {
           apiHost: 'https://api.openai.com',
         },
       },
-      __version: 2,
+      __version: 4,
     })
   })
 })

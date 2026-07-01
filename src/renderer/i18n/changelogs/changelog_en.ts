@@ -1,12 +1,23 @@
 const changelog = `
-## v1.20.3 - 2026.04.29
-1. Redesigned Chatbox AI subscription detail card UI
-2. Fixed follow-up messages failing with "reasoning_content in the thinking mode must be passed back to the API" on DeepSeek V4 thinking mode
+## v1.21.1 - 2026.06.12
+1. Fixed an issue where the send button could stay disabled after uploading files
+2. Updated the Android app icon
 
-## v1.20.2 - 2026.04.23
-1. Added GPT Image 2 model support
+## v1.21.0 - 2026.06.08
+1. Added Vercel AI Gateway provider
+2. Added provider Spotlight for faster provider selection
+3. Added file conversation support and improved large file and multi-attachment handling
+4. Added GPT Image 2 support and harmful content reporting for image generation
+5. Added Microsoft Translate as a backup translation service
+6. Improved web search reliability for BoCha, Tavily, and mobile Bing search
+7. Improved error display with clearer localized messages, request IDs, and retry status
+8. Improved session list performance and stability, including bulk delete, ordering, and migration fixes
+9. Fixed Electron upgrade regressions around local file paths, database locations, and attachments
+10. Fixed duplicate AI requests after network errors
+11. Fixed multiple knowledge base, login state, guide, and settings issues
+12. Updated Windows app icons
 
-## v1.20.1 - 2026.04.09
+## v1.20.1 - 2026.04.03
 1. Added verification code login support
 2. Added AWS Bedrock provider support
 3. Added BoCha and Querit.ai web search providers
@@ -20,8 +31,7 @@ const changelog = `
 11. Fixed Gemini 3 models thinking mode configuration
 12. Fixed macOS input focus causing empty bottom margin
 13. Fixed Android large file export auto-rename
-14. Fixed message navigation button scrolling
-15. Removed deprecated Gemini OAuth support
+14. Removed deprecated Gemini OAuth support
 
 ## v1.20.0 - 2026.03.30
 1. New chat bubble mode for a more natural conversation experience

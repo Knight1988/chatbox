@@ -10,6 +10,13 @@ import { navigateToSettings } from '@/modals/Settings'
 import { trackingEvent } from '@/packages/event'
 import { buildChatboxUrl } from '@/packages/remote'
 import platform from '@/platform'
+import {
+  isSessionAttachmentRagAuthError,
+  isSessionAttachmentRagIndexingError,
+  SESSION_ATTACHMENT_RAG_PARSED_CONTENT_TOO_LARGE_ERROR,
+  SESSION_ATTACHMENT_RAG_REQUIRES_KNOWLEDGE_BASE_ERROR,
+  SESSION_ATTACHMENT_RAG_REQUIRES_TOOL_USE_MODEL_ERROR,
+} from '@/stores/sessionHelpers'
 import * as settingActions from '@/stores/settingActions'
 
 interface FileParseErrorProps {
@@ -31,6 +38,50 @@ const FileParseError = NiceModal.create(({ errorCode, fileName }: FileParseError
 
   // 错误提示内容
   const renderErrorTips = () => {
+    if (isSessionAttachmentRagAuthError(errorCode)) {
+      return (
+        <Text>
+          {t(
+            'This large file needs Chatbox AI to finish indexing. Sign in to Chatbox AI, then retry this file. If you do not want to use Chatbox AI, remove the file and upload a smaller attachment instead.'
+          )}
+        </Text>
+      )
+    }
+    if (isSessionAttachmentRagIndexingError(errorCode)) {
+      return (
+        <Text>
+          {t(
+            'Large file indexing failed. The file was parsed, but Chatbox could not save the local search index. Remove this file and try uploading it again. If the problem continues, use a smaller file or Knowledge Base.'
+          )}
+        </Text>
+      )
+    }
+    if (errorCode === SESSION_ATTACHMENT_RAG_REQUIRES_KNOWLEDGE_BASE_ERROR) {
+      return (
+        <Text>
+          {t('This attachment is too large for chat attachments. Please upload it through Knowledge Base instead.')}
+        </Text>
+      )
+    }
+    if (errorCode === SESSION_ATTACHMENT_RAG_PARSED_CONTENT_TOO_LARGE_ERROR) {
+      return (
+        <Text>
+          {t(
+            'This document contains too much text for chat attachments. Please upload it through Knowledge Base instead.'
+          )}
+        </Text>
+      )
+    }
+    if (errorCode === SESSION_ATTACHMENT_RAG_REQUIRES_TOOL_USE_MODEL_ERROR) {
+      return (
+        <Text>
+          {t(
+            'Large file Q&A requires a model with tool use support. Switch to a compatible model or remove this file.'
+          )}
+        </Text>
+      )
+    }
+
     if (!errorDetail) {
       // 未知错误
       return <Text>{t('Failed to parse file. Please try again or use a different file format.')}</Text>

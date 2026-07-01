@@ -1,8 +1,8 @@
-import type { JSONValue } from '@ai-sdk/provider'
-import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import type { Message, MessageContentParts, MessageToolCallPart } from '@shared/types'
 import type { ModelDependencies } from '@shared/types/adapters'
+import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import type { FilePart, ImagePart, ModelMessage, TextPart, ToolCallPart } from 'ai'
+import type { JSONValue } from '@ai-sdk/provider'
 import dayjs from 'dayjs'
 import { compact } from 'lodash'
 import { createModelDependencies } from '@/adapters'
@@ -68,7 +68,7 @@ async function convertContentParts<T extends TextPart | ImagePart | FilePart>(
   )
 }
 
-function convertUserContentParts(
+async function convertUserContentParts(
   contentParts: MessageContentParts,
   dependencies: ModelDependencies,
   options?: { modelSupportVision: boolean }
@@ -230,7 +230,7 @@ export function injectModelSystemPrompt(
     'YYYY-MM-DD'
   )}\n Additional info for this conversation: ${additionalInfo}\n\n`
   let hasInjected = false
-  return messages.map((m) => {
+  const injectedMessages = messages.map((m) => {
     if (m.role === role && !hasInjected) {
       m = cloneMessage(m) // 复制，防止原始数据在其他地方被直接渲染使用
       m.contentParts = [{ type: 'text', text: metadataPrompt + getMessageText(m) }]
@@ -238,4 +238,15 @@ export function injectModelSystemPrompt(
     }
     return m
   })
+
+  if (!hasInjected) {
+    injectedMessages.unshift({
+      id: `injected-system-prompt-${dayjs().valueOf()}`,
+      role,
+      timestamp: Date.now(),
+      contentParts: [{ type: 'text', text: metadataPrompt.trimEnd() }],
+    })
+  }
+
+  return injectedMessages
 }

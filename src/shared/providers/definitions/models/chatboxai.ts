@@ -1,12 +1,22 @@
+import { type AnthropicProviderOptions, createAnthropic } from '@ai-sdk/anthropic'
 import {
   createGoogleGenerativeAI,
   type GoogleGenerativeAIProvider,
   type GoogleGenerativeAIProviderOptions,
 } from '@ai-sdk/google'
+import { buildGeminiImageConfig } from '../gemini-types'
+import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import { streamText } from 'ai'
-import AbstractAISDKModel from '../../../models/abstract-ai-sdk'
-import type { CallChatCompletionOptions, ModelInterface } from '../../../models/types'
+import { type ModelMessage, streamText, type ToolSet } from 'ai'
+import AbstractAISDKModel, { type CallSettings } from '../../../models/abstract-ai-sdk'
+import { addAnthropicCacheControl } from '../../../models/anthropic-cache'
+import type { StreamTextResult } from '../../../types'
+import type {
+  CallChatCompletionOptions,
+  ChatStreamOptions,
+  ModelInterface,
+  ModelStreamPart,
+} from '../../../models/types'
 import { getChatboxAPIOrigin } from '../../../request/chatboxai_pool'
 import type { ChatboxAILicenseDetail, ProviderModelInfo } from '../../../types'
 import type { ModelDependencies } from '../../../types/adapters'
@@ -67,6 +77,28 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
         fetch: this.chatboxAIFetch.bind(this),
       })
       return provider
+    } else if (this.options.model.apiStyle === 'anthropic') {
+      const provider = createAnthropic({
+        apiKey: this.options.licenseKey || '',
+        baseURL: `${getChatboxAPIOrigin()}/gateway/anthropic/v1`,
+        headers: {
+          'Instance-Id': instanceId,
+          'chatbox-session-id': options.sessionId || '',
+        },
+        fetch: this.chatboxAIFetch.bind(this),
+      })
+      return provider
+    } else if (this.options.model.apiStyle === 'openai-responses') {
+      const provider = createOpenAI({
+        apiKey: this.options.licenseKey || '',
+        baseURL: `${getChatboxAPIOrigin()}/gateway/openai-responses/v1`,
+        headers: {
+          'Instance-Id': instanceId,
+          'chatbox-session-id': options.sessionId || '',
+        },
+        fetch: this.chatboxAIFetch.bind(this),
+      })
+      return provider
     } else {
       const provider = createOpenAICompatible({
         name: 'ChatboxAI',
@@ -82,7 +114,29 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
     }
   }
 
-  protected getCallSettings() {
+  protected getCallSettings(options: CallChatCompletionOptions): CallSettings {
+    if (this.options.model.apiStyle === 'anthropic') {
+      const isModelSupportReasoning = this.isSupportReasoning()
+      let providerOptions = {} as { anthropic: AnthropicProviderOptions }
+      if (isModelSupportReasoning) {
+        providerOptions = {
+          anthropic: {
+            ...(options.providerOptions?.claude || {}),
+          },
+        }
+      }
+      // Anthropic API requires only one of temperature or topP
+      const callSettings: CallSettings = {
+        providerOptions,
+        maxOutputTokens: this.options.maxOutputTokens,
+      }
+      if (this.options.temperature !== undefined) {
+        callSettings.temperature = this.options.temperature
+      } else if (this.options.topP !== undefined) {
+        callSettings.topP = this.options.topP
+      }
+      return callSettings
+    }
     return {
       temperature: this.options.temperature,
       topP: this.options.topP,
@@ -94,6 +148,8 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
     const provider = this.getProvider(options)
     if (this.options.model.apiStyle === 'google') {
       return (provider as GoogleGenerativeAIProvider).chat(this.options.model.modelId)
+    } else if (this.options.model.apiStyle === 'openai-responses') {
+      return (provider as OpenAIProvider).responses(this.options.model.modelId)
     } else {
       return provider.languageModel(this.options.model.modelId)
     }
@@ -107,7 +163,7 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
       aspectRatio?: string
     },
     signal?: AbortSignal,
-    callback?: (picBase64: string) => void
+    callback?: (picBase64: string) => void | Promise<void>
   ): Promise<string[]> {
     if (this.options.model.apiStyle === 'google') {
       return this.paintWithGemini(params, signal, callback)
@@ -123,7 +179,7 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
       aspectRatio?: string
     },
     signal?: AbortSignal,
-    callback?: (picBase64: string) => void
+    callback?: (picBase64: string) => void | Promise<void>
   ): Promise<string[]> {
     const provider = this.getGoogleProvider()
     const model = provider.chat(this.options.model.modelId)
@@ -141,8 +197,9 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
       const providerOptions: GoogleGenerativeAIProviderOptions = {
         responseModalities: ['TEXT', 'IMAGE'],
       }
-      if (params.aspectRatio && params.aspectRatio !== 'auto') {
-        providerOptions.imageConfig = { aspectRatio: params.aspectRatio }
+      const imageConfig = buildGeminiImageConfig(params.aspectRatio)
+      if (imageConfig) {
+        providerOptions.imageConfig = imageConfig
       }
 
       const result = streamText({
@@ -152,13 +209,15 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
         providerOptions: {
           google: providerOptions,
         },
+        // Image generation is billable; network-error retries could double-charge.
+        maxRetries: 0,
       })
 
       for await (const chunk of result.fullStream) {
         if (chunk.type === 'file' && chunk.file.mediaType?.startsWith('image/') && chunk.file.base64) {
           const dataUrl = `data:${chunk.file.mediaType};base64,${chunk.file.base64}`
           results.push(dataUrl)
-          callback?.(dataUrl)
+          await callback?.(dataUrl)
         }
       }
     }
@@ -187,15 +246,13 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
       aspectRatio?: string
     },
     signal?: AbortSignal,
-    callback?: (picBase64: string) => void
+    callback?: (picBase64: string) => void | Promise<void>
   ): Promise<string[]> {
     const concurrence: Promise<string>[] = []
     for (let i = 0; i < params.num; i++) {
       concurrence.push(
-        this.callImageGeneration(params.prompt, params.images, params.aspectRatio, signal).then((picBase64) => {
-          if (callback) {
-            callback(picBase64)
-          }
+        this.callImageGeneration(params.prompt, params.images, params.aspectRatio, signal).then(async (picBase64) => {
+          await callback?.(picBase64)
           return picBase64
         })
       )
@@ -236,6 +293,19 @@ export default class ChatboxAI extends AbstractAISDKModel implements ModelInterf
       throw new Error('Invalid response format from image generation API')
     }
     return json['data'][0]['b64_json']
+  }
+
+  public async chat(messages: ModelMessage[], options: CallChatCompletionOptions): Promise<StreamTextResult> {
+    const cached = this.options.model.apiStyle === 'anthropic' ? addAnthropicCacheControl(messages) : messages
+    return super.chat(cached, options)
+  }
+
+  public async *chatStream<T extends ToolSet>(
+    messages: ModelMessage[],
+    options: ChatStreamOptions
+  ): AsyncGenerator<ModelStreamPart<T>> {
+    const cached = this.options.model.apiStyle === 'anthropic' ? addAnthropicCacheControl(messages) : messages
+    yield* super.chatStream<T>(cached, options)
   }
 
   isSupportSystemMessage() {

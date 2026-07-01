@@ -2,6 +2,16 @@ import { StorageKeyGenerator } from '@/storage/StoreStorage'
 import type { PreConstructedMessageState, PreprocessedFile, PreprocessedLink } from '../../types/input-box'
 export type { PreConstructedMessageState }
 
+function getFileKeys(file: File, additionalKeys: Iterable<string> = []): Set<string> {
+  const keys = new Set(additionalKeys)
+  keys.add(StorageKeyGenerator.fileUniqKey(file))
+  return keys
+}
+
+function fileKeyMatches(file: File, keys: Set<string>): boolean {
+  return keys.has(StorageKeyGenerator.fileUniqKey(file))
+}
+
 // ----- Link helpers -----
 
 export function markLinkProcessing(prev: PreConstructedMessageState, url: string): PreConstructedMessageState {
@@ -42,6 +52,9 @@ export function onLinkProcessed(
   max: number = 6
 ): PreConstructedMessageState {
   const key = StorageKeyGenerator.linkUniqKey(url)
+  if (prev.preprocessingStatus.links[key] !== 'processing') {
+    return prev
+  }
   const newPromises = new Map(prev.preprocessingPromises.links)
   newPromises.delete(key)
 
@@ -123,23 +136,31 @@ export function onFileProcessed(
   prev: PreConstructedMessageState,
   file: File,
   item: PreprocessedFile,
-  max: number = 20
+  max: number = 20,
+  options: { fileKeys?: Iterable<string> } = {}
 ): PreConstructedMessageState {
-  const key = StorageKeyGenerator.fileUniqKey(file)
+  const keys = getFileKeys(file, options.fileKeys)
+  const key = Array.from(keys).find((candidateKey) => prev.preprocessingStatus.files[candidateKey] === 'processing')
+  if (!key) {
+    return prev
+  }
   const newPromises = new Map(prev.preprocessingPromises.files)
-  newPromises.delete(key)
+  for (const fileKey of keys) {
+    newPromises.delete(fileKey)
+  }
 
   const nextFiles = [...prev.preprocessedFiles, item].slice(-max)
+  const nextFileStatuses = { ...prev.preprocessingStatus.files }
+  for (const fileKey of keys) {
+    nextFileStatuses[fileKey] = fileKey === key ? (item.error ? 'error' : 'completed') : undefined
+  }
 
   return {
     ...prev,
     preprocessedFiles: nextFiles,
     preprocessingStatus: {
       ...prev.preprocessingStatus,
-      files: {
-        ...prev.preprocessingStatus.files,
-        [key]: item.error ? 'error' : 'completed',
-      },
+      files: nextFileStatuses,
     },
     preprocessingPromises: {
       ...prev.preprocessingPromises,
@@ -148,20 +169,29 @@ export function onFileProcessed(
   }
 }
 
-export function cleanupFile(prev: PreConstructedMessageState, file: File): PreConstructedMessageState {
-  const key = StorageKeyGenerator.fileUniqKey(file)
+export function cleanupFile(
+  prev: PreConstructedMessageState,
+  file: File,
+  options: { fileKeys?: Iterable<string>; removeAttachment?: boolean } = {}
+): PreConstructedMessageState {
+  const keys = getFileKeys(file, options.fileKeys)
   const newFilePromises = new Map(prev.preprocessingPromises.files)
-  newFilePromises.delete(key)
+  for (const key of keys) {
+    newFilePromises.delete(key)
+  }
+
+  const nextFileStatuses = { ...prev.preprocessingStatus.files }
+  for (const key of keys) {
+    nextFileStatuses[key] = undefined
+  }
 
   return {
     ...prev,
-    preprocessedFiles: prev.preprocessedFiles.filter((f) => f.file.name !== file.name),
+    attachments: options.removeAttachment ? prev.attachments.filter((f) => !fileKeyMatches(f, keys)) : prev.attachments,
+    preprocessedFiles: prev.preprocessedFiles.filter((f) => !fileKeyMatches(f.file, keys)),
     preprocessingStatus: {
       ...prev.preprocessingStatus,
-      files: {
-        ...prev.preprocessingStatus.files,
-        [key]: undefined,
-      },
+      files: nextFileStatuses,
     },
     preprocessingPromises: {
       ...prev.preprocessingPromises,

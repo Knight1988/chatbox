@@ -3,7 +3,14 @@ import { z } from 'zod'
 import { getLogger } from '@/lib/utils'
 import platform from '@/platform'
 import { authInfoStore } from '@/stores/authInfoStore'
-import { CHATBOX_BUILD_CHANNEL, USE_BETA_API, USE_BETA_CHATBOX, USE_LOCAL_API, USE_LOCAL_CHATBOX } from '@/variables'
+import {
+  CHATBOX_BUILD_CHANNEL,
+  USE_BETA_API,
+  USE_BETA_CHATBOX,
+  USE_LOCAL_API,
+  USE_LOCAL_CHATBOX,
+  USE_NEWDB_API,
+} from '@/variables'
 import * as chatboxaiAPI from '../../shared/request/chatboxai_pool'
 import { createAfetch, createAuthenticatedAfetch, uploadFile } from '../../shared/request/request'
 import {
@@ -13,6 +20,7 @@ import {
   type ModelProvider,
   ProviderModelInfoSchema,
   type RemoteConfig,
+  type SessionRagConfig,
   type Settings,
 } from '../../shared/types'
 import { getOS } from './navigator'
@@ -90,11 +98,13 @@ async function getAuthenticatedAfetch() {
 // ========== API ORIGIN 根据可用性维护 ==========
 
 // const RELEASE_ORIGIN = 'https://releases.chatboxai.app'
-function getAPIOrigin() {
+export function getAPIOrigin() {
   if (USE_LOCAL_API) {
     return 'http://localhost:8002'
   } else if (USE_BETA_API) {
     return 'https://api-beta.chatboxai.app'
+  } else if (USE_NEWDB_API) {
+    return 'https://beta-new-db.chatboxai.app'
   } else {
     return chatboxaiAPI.getChatboxAPIOrigin()
   }
@@ -242,6 +252,77 @@ export async function getRemoteConfig(config: keyof RemoteConfig) {
     headers: await getChatboxHeaders(),
   })
   return res['data']
+}
+
+/**
+ * In-memory cache for session RAG remote config. The config controls toolset
+ * capabilities (rerank availability, rerank model) which the renderer needs every time
+ * a tool set is built — once per generation. Hitting the network on each call is
+ * wasteful and adds latency to message submission. The remote config changes rarely
+ * (capability flag flips, model swaps), so a 10-minute TTL is comfortable.
+ *
+ * Each cache entry stores the in-flight promise so concurrent callers share a single
+ * request. On rejection the entry is evicted so the next caller retries.
+ */
+type SessionRagConfigCacheEntry = {
+  expiresAt: number
+  promise: Promise<SessionRagConfig>
+}
+
+const SESSION_RAG_CONFIG_CACHE_TTL_MS = 10 * 60 * 1000
+const sessionRagConfigCache = new Map<string, SessionRagConfigCacheEntry>()
+
+export async function getSessionRagConfig(params?: { licenseKey?: string }) {
+  type Response = {
+    data: SessionRagConfig
+  }
+  const cacheKey = params?.licenseKey ?? ''
+  const now = Date.now()
+  const cached = sessionRagConfigCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) {
+    return cached.promise
+  }
+
+  const promise = (async () => {
+    const headers = await getChatboxHeaders()
+    const res = await ofetch<Response>(`${getAPIOrigin()}/api/session_rag/config`, {
+      retry: 3,
+      headers: {
+        ...(params?.licenseKey ? { Authorization: `Bearer ${params.licenseKey}` } : {}),
+        ...headers,
+      },
+    })
+    return res.data
+  })()
+
+  const entry: SessionRagConfigCacheEntry = {
+    expiresAt: now + SESSION_RAG_CONFIG_CACHE_TTL_MS,
+    promise,
+  }
+  sessionRagConfigCache.set(cacheKey, entry)
+
+  // Evict on failure so the next caller retries instead of being stuck with a rejected
+  // promise for the entire TTL window.
+  promise.catch(() => {
+    if (sessionRagConfigCache.get(cacheKey) === entry) {
+      sessionRagConfigCache.delete(cacheKey)
+    }
+  })
+
+  return promise
+}
+
+/**
+ * Invalidate cached session RAG config. Call this when the license changes or when the
+ * caller has reason to believe the remote config has been updated (e.g. user just
+ * activated a new license, signed out).
+ */
+export function invalidateSessionRagConfigCache(licenseKey?: string) {
+  if (licenseKey === undefined) {
+    sessionRagConfigCache.clear()
+    return
+  }
+  sessionRagConfigCache.delete(licenseKey)
 }
 
 export interface DialogConfig {
@@ -397,11 +478,7 @@ export async function uploadAndCreateUserFile(licenseKey: string, file: File) {
   return storageKey
 }
 
-export async function parseUserLinkPro(params: {
-  licenseKey: string
-  url: string
-  abortSignal?: AbortSignal
-}) {
+export async function parseUserLinkPro(params: { licenseKey: string; url: string; abortSignal?: AbortSignal }) {
   type Response = {
     data: {
       uuid: string
@@ -571,17 +648,20 @@ const RemoteModelInfoSchema = z.object({
   modelId: z.string(),
   modelName: z.string(),
   labels: z.array(z.string()).optional(),
-  type: z.enum(['chat', 'embedding', 'rerank']).optional(),
-  apiStyle: z.enum(['google', 'openai', 'anthropic']).optional(),
+  type: z.enum(['chat', 'embedding', 'rerank', 'image']).optional(),
+  apiStyle: z.enum(['google', 'openai', 'openai-responses', 'anthropic']).optional(),
   contextWindow: z.number().optional(),
   capabilities: z.array(z.enum(['vision', 'tool_use', 'reasoning'])).optional(),
 })
+
+export type RemoteModelInfo = z.infer<typeof RemoteModelInfoSchema>
 
 const ModelManifestResponseSchema = z.object({
   success: z.boolean().optional(),
   data: z.object({
     groupName: z.string(),
     models: z.array(RemoteModelInfoSchema),
+    imageModels: z.array(RemoteModelInfoSchema).optional().default([]),
   }),
 })
 
@@ -957,15 +1037,21 @@ export interface ImageCompletionRequest {
 }
 
 // Zod schemas for runtime validation
+// 后端异步生图任务的单个图片 item 状态；不要和客户端本地状态 ImageGeneration.status 混淆。
+// 这些状态来自接口，客户端会在 imageGenerationActions.ts 中聚合成一条本地生成记录的整体状态。
 const ImageGenerationItemSchema = z.object({
   uuid: z.string(),
   status: z.enum(['pending', 'processing', 'completed', 'failed']),
   created_at: z.string(),
   image_url: z.string().optional(),
   generated_at: z.string().optional(),
+  error_code: z.string().optional(),
+  error_message: z.string().optional(),
 })
 
 const ImageGenerationTaskResponseSchema = z.object({
+  // 接口结构预留为数组，但当前产品功能层面不支持一次异步生成多张图。
+  // 现阶段后端也写死item 为 1；
   items: z.array(ImageGenerationItemSchema),
   is_finished: z.boolean(),
   task_id: z.string(),

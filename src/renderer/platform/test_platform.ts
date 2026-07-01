@@ -11,8 +11,11 @@ import * as defaults from '@shared/defaults'
 import type { Config, Language, Settings, ShortcutSetting } from '@shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { type ImageGenerationStorage, IndexedDBImageGenerationStorage } from '@/storage/ImageGenerationStorage'
+import { IndexedDBSessionMetaStorage, type SessionMetaStorage } from '@/storage/SessionMetaStorage'
+import { IndexedDBTaskSessionStorage, type TaskSessionStorage } from '@/storage/TaskSessionStorage'
 import type { Exporter, Platform, PlatformType, Storage } from './interfaces'
 import type { KnowledgeBaseController } from './knowledge-base/interface'
+import type { SessionAttachmentRagController } from './session-attachment-rag/interface'
 
 /**
  * 内存存储类，用于测试环境
@@ -115,6 +118,9 @@ export default class TestPlatform implements Platform {
   public exporter: TestExporter = new TestExporter()
 
   private storage = new InMemoryStorage()
+  private _sessionMetaStorage: SessionMetaStorage | null = null
+  private _imageGenerationStorage: ImageGenerationStorage | null = null
+  private _taskSessionStorage: TaskSessionStorage | null = null
   private blobs = new Map<string, string>()
   private configs: Config | null = null
   private settings: Settings | null = null
@@ -295,6 +301,10 @@ export default class TestPlatform implements Platform {
     }
   }
 
+  public getLocalFilePath(file: File): string {
+    return file.path || ''
+  }
+
   public async isFullscreen(): Promise<boolean> {
     return false
   }
@@ -311,8 +321,29 @@ export default class TestPlatform implements Platform {
     throw new Error('Knowledge base not implemented in test platform.')
   }
 
+  public getSessionAttachmentRagController(): SessionAttachmentRagController {
+    throw new Error('Session attachment RAG not implemented in test platform.')
+  }
+
   public getImageGenerationStorage(): ImageGenerationStorage {
-    return new IndexedDBImageGenerationStorage()
+    if (!this._imageGenerationStorage) {
+      this._imageGenerationStorage = new IndexedDBImageGenerationStorage()
+    }
+    return this._imageGenerationStorage
+  }
+
+  public getTaskSessionStorage(): TaskSessionStorage {
+    if (!this._taskSessionStorage) {
+      this._taskSessionStorage = new IndexedDBTaskSessionStorage()
+    }
+    return this._taskSessionStorage
+  }
+
+  public getSessionMetaStorage(): SessionMetaStorage {
+    if (!this._sessionMetaStorage) {
+      this._sessionMetaStorage = new IndexedDBSessionMetaStorage()
+    }
+    return this._sessionMetaStorage
   }
 
   public async minimize(): Promise<void> {
@@ -380,6 +411,9 @@ export default class TestPlatform implements Platform {
     this.exporter.clear()
     this.configs = null
     this.settings = null
+    this._sessionMetaStorage = null
+    this._imageGenerationStorage = null
+    this._taskSessionStorage = null
   }
 
   /**

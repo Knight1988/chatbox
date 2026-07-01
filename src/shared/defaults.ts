@@ -87,6 +87,9 @@ export function settings(): Settings {
 
     allowReportingAndTracking: true,
 
+    hasExpiredLicense: false,
+    chatboxAIDesktopPromptDismissed: false,
+
     enableMarkdownRendering: true,
     enableLaTeXRendering: true,
     enableMermaidRendering: true,
@@ -113,7 +116,6 @@ export function settings(): Settings {
       sessionListNavNext: 'mod+tab', // 切换到下一个会话的快捷键
       sessionListNavPrev: 'mod+shift+tab', // 切换到上一个会话的快捷键
       sessionListNavTargetIndex: 'mod', // 会话导航的快捷键
-      messageListRefreshContext: 'mod+r', // 刷新上下文的快捷键
       dialogOpenSearch: 'mod+k', // 打开搜索对话框的快捷键
       inputBoxSendMessage: 'Enter', // 发送消息的快捷键
       inputBoxSendMessageWithoutResponse: 'Ctrl+Enter', // 发送但不生成回复的快捷键
@@ -126,6 +128,9 @@ export function settings(): Settings {
         provider: 'build-in',
         tavilyApiKey: '',
         bochaApiKey: '',
+        queritApiKey: '',
+        queritMaxResults: 5,
+        queritTimeRange: 'none',
       },
       knowledgeBase: {
         models: {
@@ -134,7 +139,7 @@ export function settings(): Settings {
         },
       },
       // documentParser is NOT set here - it uses platform-specific defaults
-      // Desktop: 'local', Mobile/Web: 'chatbox-ai'
+      // Desktop: 'local', Mobile/Web: 'none'
       // See settingsStore.ts for the platform-aware initialization logic
       documentParser: undefined,
     },

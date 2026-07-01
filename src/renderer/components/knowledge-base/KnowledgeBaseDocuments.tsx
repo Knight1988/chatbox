@@ -16,6 +16,12 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core'
+import {
+  KNOWLEDGE_BASE_MAX_FILE_SIZE,
+  KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL,
+  KNOWLEDGE_BASE_MAX_PARSED_CONTENT_SIZE_LABEL,
+  KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR,
+} from '@shared/knowledge-base'
 import type { FileMeta, KnowledgeBase } from '@shared/types'
 import { formatFileSize } from '@shared/utils'
 import {
@@ -25,7 +31,6 @@ import {
   IconCircleCheck,
   IconExclamationCircle,
   IconFile,
-  IconInfoCircle,
   IconLoader,
   IconPlayerPause,
   IconPlayerPlay,
@@ -38,8 +43,11 @@ import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import { trackJkClickEvent } from '@/analytics/jk'
+import { JK_EVENTS, JK_PAGE_NAMES } from '@/analytics/jk-events'
 import { useKnowledgeBaseFiles, useKnowledgeBaseFilesActions, useKnowledgeBaseFilesCount } from '@/hooks/knowledge-base'
 import { useChunksPreview } from '@/hooks/useChunksPreview'
+import { toastError } from '@/packages/toast'
 import platform from '@/platform'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { trackEvent } from '@/utils/track'
@@ -50,6 +58,11 @@ interface KnowledgeBaseDocumentsProps {
   knowledgeBase: KnowledgeBase | null
 }
 
+interface RejectedFile {
+  name: string
+  size: number
+}
+
 const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowledgeBase }) => {
   const { t } = useTranslation()
   const [isExpanded, setIsExpanded] = useState(false)
@@ -57,6 +70,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
   const [isDragOver, setIsDragOver] = useState(false)
   const [showUploadArea, setShowUploadArea] = useState(false)
   const [showRemoteRetryModal, setShowRemoteRetryModal] = useState(false)
+  const [sizeRejectedFiles, setSizeRejectedFiles] = useState<RejectedFile[]>([])
 
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const globalDocumentParserType = useSettingsStore((state) => state.extension?.documentParser?.type)
@@ -112,7 +126,11 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
   const shouldShowChatboxAISuggestion = useMemo(() => {
     if (failedFiles.length === 0) return false
     // Check if any failed file used a parser that should show the suggestion
-    return failedFiles.some((file) => !PARSER_NO_SUGGESTION_LIST.includes(file.parser_type || 'local'))
+    return failedFiles.some(
+      (file) =>
+        file.error !== KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR &&
+        !PARSER_NO_SUGGESTION_LIST.includes(file.parser_type || 'local')
+    )
   }, [failedFiles])
 
   // MIME type correction for Windows compatibility
@@ -152,13 +170,13 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
         // Default to text/plain for unknown text-like files
         mimeType = 'text/plain'
       }
-
-      console.log(`[Upload] Corrected MIME type for ${file.name}: "${file.type}" -> "${mimeType}"`)
     }
+
+    const filePath = platform.getLocalFilePath(file)
 
     return {
       name: file.name,
-      path: file.path,
+      path: filePath,
       type: mimeType,
       size: file.size,
     }
@@ -168,7 +186,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
   const maxHeight = 5 * 60 // 5 items * 60px
 
   // Handle scroll position change
-  const handleScrollPositionChange = useCallback((position: { x: number; y: number }) => {
+  const handleScrollPositionChange = useCallback((_position: { x: number; y: number }) => {
     setShowScrollIndicator(true)
   }, [])
 
@@ -232,25 +250,39 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
     async (files: FileList) => {
       if (!knowledgeBase?.id || !files.length) return
 
-      console.log(`[Upload] Starting upload for ${files.length} files.`)
-
       try {
         const knowledgeBaseController = platform.getKnowledgeBaseController()
+        const oversizedFiles = Array.from(files)
+          .filter((file) => file.size > KNOWLEDGE_BASE_MAX_FILE_SIZE)
+          .map((file) => ({ name: file.name, size: file.size }))
+        const uploadableFiles = Array.from(files).filter((file) => file.size <= KNOWLEDGE_BASE_MAX_FILE_SIZE)
+
+        if (oversizedFiles.length > 0) {
+          setSizeRejectedFiles(oversizedFiles)
+          toastError(
+            t('{{count}} file(s) exceed the {{limit}} knowledge base upload limit.', {
+              count: oversizedFiles.length,
+              limit: KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL,
+            })
+          )
+        } else {
+          setSizeRejectedFiles([])
+        }
+
+        if (uploadableFiles.length === 0) {
+          return
+        }
 
         // Process and correct MIME types for all files
         const correctedFiles: FileMeta[] = []
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i]
+        for (const file of uploadableFiles) {
           const correctedFile = correctMimeType(file)
           correctedFiles.push(correctedFile)
-
-          console.log(`[Upload] File ${i + 1}/${files.length}: ${file.name} (${correctedFile.type})`)
         }
 
         // Upload all files using allSettled to allow partial successes
         const uploadResults = await Promise.allSettled(
           correctedFiles.map(async (file) => {
-            console.log(`[Upload] Starting upload for file: ${file.name}`)
             await knowledgeBaseController.uploadFile(knowledgeBase.id, file)
             return file
           })
@@ -261,11 +293,11 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
         const failedUploads = uploadResults.filter((result) => result.status === 'rejected')
 
         // Log individual failures
-        failedUploads.forEach((result, index) => {
+        uploadResults.forEach((result, index) => {
           if (result.status === 'rejected') {
-            const fileName = correctedFiles[uploadResults.indexOf(result)]?.name || 'Unknown file'
+            const fileName = correctedFiles[index]?.name || 'Unknown file'
             console.error(`[Upload] Failed to upload file ${fileName}:`, result.reason)
-            toast.error(
+            toastError(
               t('Failed to upload {{filename}}: {{error}}', {
                 filename: fileName,
                 error: (result.reason as Error)?.message || 'Unknown error',
@@ -275,27 +307,32 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
         })
 
         // Provide appropriate user feedback
-        if (successfulUploads.length > 0 && failedUploads.length === 0) {
-          console.log(`[Upload] All files uploaded successfully.`)
+        const blockedUploadCount = failedUploads.length + oversizedFiles.length
+
+        if (successfulUploads.length > 0 && blockedUploadCount === 0) {
           toast.success(t('Successfully uploaded {{count}} file(s)', { count: successfulUploads.length }))
-        } else if (successfulUploads.length > 0 && failedUploads.length > 0) {
-          console.log(
-            `[Upload] Partial success: ${successfulUploads.length} succeeded, ${failedUploads.length} failed.`
-          )
+        } else if (successfulUploads.length > 0 && blockedUploadCount > 0) {
           toast.success(
             t('Successfully uploaded {{success}} of {{total}} file(s). {{failed}} file(s) failed.', {
               success: successfulUploads.length,
               total: files.length,
-              failed: failedUploads.length,
+              failed: blockedUploadCount,
             })
           )
-        } else if (failedUploads.length === files.length) {
-          console.log(`[Upload] All files failed to upload.`)
+        } else if (blockedUploadCount === files.length) {
           // Don't show additional error toast here since individual errors were already shown
         }
 
         // Track successful uploads only
         if (successfulUploads.length > 0) {
+          trackEvent('knowledge_base_document_added', {
+            knowledge_base_id: knowledgeBase.id,
+            knowledge_base_name: knowledgeBase.name,
+            file_count: successfulUploads.length,
+            total_attempted: files.length,
+            failed_count: blockedUploadCount,
+            file_types: Array.from(new Set(correctedFiles.map((f) => f.type || 'unknown'))),
+          })
 
           // Immediately refresh the data to show the new files
           await Promise.all([refetch(), refetchCount()])
@@ -310,7 +347,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
         }
       } catch (error) {
         console.error('[Upload] Upload operation failed:', error)
-        toast.error(
+        toastError(
           t('Upload failed: {{error}}', {
             error: (error as Error)?.message || 'Unknown error',
           })
@@ -396,7 +433,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
       if (invalidFiles.length > 0) {
         const invalidFileNames = invalidFiles.map((f) => f.name).join(', ')
         const supportedTypes = getSupportedFileTypes()
-        toast.error(
+        toastError(
           t('{{count}} file(s) not supported: {{files}}. Supported formats: {{formats}}', {
             count: invalidFiles.length,
             files: invalidFileNames,
@@ -407,8 +444,6 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
 
       // Upload valid files if any
       if (validFiles.length > 0) {
-        console.log(`[Upload] Drag & Drop: ${validFiles.length} valid files out of ${files.length} total`)
-
         // Create a proper FileList-like object
         const fileListLike = Object.assign(validFiles, {
           item: (index: number) => validFiles[index] || null,
@@ -566,29 +601,30 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
       case 'paused':
         return <IconPlayerPause size={16} color="var(--chatbox-tint-warning)" />
       case 'failed': {
+        const isParsedContentTooLarge = error === KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR
         // Determine label based on actual parser type used
         const getParserLabel = () => {
+          if (isParsedContentTooLarge) {
+            return t('Too much text')
+          }
           switch (parserType) {
             case 'mineru':
               return t('MinerU parse failed')
             case 'chatbox-ai':
               return t('Chatbox AI parse failed')
-            case 'local':
             default:
               return t('Local parse failed')
           }
         }
+        const errorLabel = isParsedContentTooLarge
+          ? t('Parsed document content must be {{limit}} or smaller.', {
+              limit: KNOWLEDGE_BASE_MAX_PARSED_CONTENT_SIZE_LABEL,
+            })
+          : error || t('Processing failed')
         const isRemoteParser = parserType === 'mineru' || parserType === 'chatbox-ai'
         return (
           <Flex gap={4} align="center">
-            <Tooltip
-              label={error || t('Processing failed')}
-              multiline
-              w={300}
-              withArrow
-              position="top"
-              transitionProps={{ duration: 200 }}
-            >
+            <Tooltip label={errorLabel} multiline w={300} withArrow position="top" transitionProps={{ duration: 200 }}>
               <Pill size="xs" c={isRemoteParser ? 'orange' : 'gray'} className="cursor-help">
                 {getParserLabel()}
               </Pill>
@@ -608,7 +644,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
   }
 
   // Handle file upload via button
-  const handleAddFile = useCallback(async () => {
+  const handleAddFile = useCallback(() => {
     if (!knowledgeBase?.id) return
 
     // Toggle upload area visibility
@@ -619,7 +655,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
   }, [knowledgeBase?.id, showUploadArea])
 
   // Handle file selection via file dialog
-  const handleFileDialog = useCallback(async () => {
+  const handleFileDialog = useCallback(() => {
     if (!knowledgeBase?.id) return
 
     try {
@@ -629,13 +665,10 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
       const { accept } = getSupportedFileTypes()
       input.accept = accept
 
-      console.log('[Upload] File dialog accept types:', accept)
-
       input.onchange = async (e) => {
         const files = (e.target as HTMLInputElement).files
         if (!files || !files.length) return
 
-        console.log('[Upload] Files selected:', files.length)
         await uploadFiles(files)
       }
 
@@ -645,7 +678,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
       }, 10)
     } catch (error) {
       console.error('Failed to upload file:', error)
-      toast.error(
+      toastError(
         t('Failed to open file dialog: {{error}}', {
           error: (error as Error)?.message || 'Unknown error',
         })
@@ -758,8 +791,52 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
                     <Text size="xs" c="dimmed" ta="center" mt={-4}>
                       {t('Supported formats')}: {supportedTypes.display.join(', ')}
                     </Text>
+                    <Text size="xs" c="dimmed" ta="center" mt={-8}>
+                      {t('Maximum file size')}: {KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL}
+                    </Text>
                   </Stack>
                 </Paper>
+                {sizeRejectedFiles.length > 0 && (
+                  <Alert
+                    mt="sm"
+                    variant="light"
+                    color="red"
+                    icon={<IconExclamationCircle size={18} />}
+                    title={t('Some files were not uploaded')}
+                    styles={{
+                      root: {
+                        border: '1px solid var(--chatbox-border-primary)',
+                        borderLeft: '3px solid var(--chatbox-tint-error)',
+                        background: 'var(--chatbox-background-primary)',
+                      },
+                    }}
+                  >
+                    <Stack gap={6}>
+                      <Text size="sm">
+                        {t('Knowledge Base documents must be {{limit}} or smaller.', {
+                          limit: KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL,
+                        })}
+                      </Text>
+                      <Stack gap={4}>
+                        {sizeRejectedFiles.slice(0, 3).map((file) => (
+                          <Group key={`${file.name}-${file.size}`} justify="space-between" gap="sm" wrap="nowrap">
+                            <Text size="xs" lineClamp={1} style={{ minWidth: 0 }}>
+                              {file.name}
+                            </Text>
+                            <Text size="xs" c="dimmed" className="shrink-0">
+                              {formatFileSize(file.size)}
+                            </Text>
+                          </Group>
+                        ))}
+                        {sizeRejectedFiles.length > 3 && (
+                          <Text size="xs" c="dimmed">
+                            {t('And {{count}} more file(s).', { count: sizeRejectedFiles.length - 3 })}
+                          </Text>
+                        )}
+                      </Stack>
+                    </Stack>
+                  </Alert>
+                )}
               </Box>
             )}
 
@@ -770,14 +847,41 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
                   <Flex gap="xs" align="center" style={{ flex: 1 }}>
                     <Text size="sm">{t('{{count}} file(s) failed to parse', { count: failedFiles.length })}</Text>
                   </Flex>
-                  <Button
-                    size="xs"
-                    variant="light"
-                    className="flex-shrink-0"
-                    onClick={() => setShowRemoteRetryModal(true)}
-                  >
-                    {t('Use server parsing')}
-                  </Button>
+                  <Stack gap={4} align="flex-end" className="flex-shrink-0">
+                    <Button size="xs" variant="light" onClick={() => setShowRemoteRetryModal(true)}>
+                      {t('Use server parsing')}
+                    </Button>
+                    <Tooltip
+                      label={t(
+                        'If you have never had a license before, you can claim it after logging in on the official website.'
+                      )}
+                      withArrow
+                      multiline
+                      maw={240}
+                      position="bottom-end"
+                      styles={{
+                        tooltip: {
+                          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+                          backdropFilter: 'blur(4px)',
+                        },
+                      }}
+                    >
+                      <Text
+                        size="xs"
+                        c="dimmed"
+                        className="cursor-pointer hover:text-blue-500 transition-colors"
+                        onClick={() => {
+                          trackJkClickEvent(JK_EVENTS.FREE_LICENSE_CLAIM_CLICK, {
+                            pageName: JK_PAGE_NAMES.SETTING_PAGE,
+                            content: 'kb_error',
+                          })
+                          platform.openLink('https://chatboxai.app/login')
+                        }}
+                      >
+                        {t('Free trial available')} →
+                      </Text>
+                    </Tooltip>
+                  </Stack>
                 </Flex>
               </Alert>
             )}
@@ -879,7 +983,7 @@ const KnowledgeBaseDocuments: React.FC<KnowledgeBaseDocumentsProps> = ({ knowled
                                 {getStatusIcon(doc.status, doc.error, doc.parser_type)}
                               </Center>
                             )}
-                            {doc.status === 'failed' && (
+                            {doc.status === 'failed' && doc.error !== KNOWLEDGE_BASE_PARSED_CONTENT_TOO_LARGE_ERROR && (
                               <ActionIcon
                                 variant="subtle"
                                 color="blue"

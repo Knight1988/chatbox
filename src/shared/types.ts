@@ -116,6 +116,53 @@ export interface RemoteConfig {
   }
 }
 
+export interface SessionRagConfig {
+  models: {
+    embedding: string
+    rerank: string
+  }
+  capabilities: {
+    session_attachment_embedding: boolean
+    session_attachment_rerank: boolean
+  }
+}
+
+export interface SessionAttachmentRagDebugSnapshot {
+  dbPath: string
+  dbSizeBytes: number
+  vectorDbPath: string
+  vectorDbSizeBytes: number
+  attachmentCount: number
+  parentCount: number
+  chunkCount: number
+  vectorIndexNames: string[]
+  statusCounts: {
+    pending: number
+    indexing: number
+    ready: number
+    failed: number
+  }
+  recentAttachments: Array<{
+    id: number
+    sessionId: string
+    messageId: string
+    filename: string
+    parserType?: string
+    status: 'pending' | 'indexing' | 'ready' | 'failed'
+    chunkCount: number
+    error?: string
+    createdAt?: number
+    processingStartedAt?: number
+    completedAt?: number
+  }>
+}
+
+export interface SessionAttachmentRagMaintenanceResult {
+  interruptedFailedCount: number
+  canceledPurgedCount: number
+  orphanDeletedIds: number[]
+}
+
 export type ChatboxAIModel = 'chatboxai-3.5' | 'chatboxai-4' | string
 
 export function copyMessage(source: Message): Message {
@@ -139,16 +186,84 @@ export function copyMessagesWithMapping(messages: Message[]): {
   return { messages: newMessages, idMapping }
 }
 
-export function copyThreads(source?: SessionThread[], idMapping?: Map<string, string>): SessionThread[] | undefined {
-  if (!source) {
+export function copyMessageForksWithMapping(
+  source?: Session['messageForksHash'],
+  initialIdMapping?: Map<string, string>
+): Session['messageForksHash'] | undefined {
+  if (!source || !initialIdMapping?.size) {
     return undefined
   }
-  return source.map((thread) => {
+
+  const copiedForks: NonNullable<Session['messageForksHash']> = {}
+  const idMapping = new Map(initialIdMapping)
+  const pendingForkIds = [...initialIdMapping.keys()]
+  const visitedForkIds = new Set<string>()
+
+  while (pendingForkIds.length > 0) {
+    const forkMessageId = pendingForkIds.shift()!
+    if (visitedForkIds.has(forkMessageId)) {
+      continue
+    }
+    visitedForkIds.add(forkMessageId)
+
+    const forkEntry = source[forkMessageId]
+    const newForkMessageId = idMapping.get(forkMessageId)
+    if (!forkEntry || !newForkMessageId) {
+      continue
+    }
+
+    copiedForks[newForkMessageId] = {
+      ...forkEntry,
+      lists: forkEntry.lists.map((list) => {
+        const messages = list.messages.map((message) => {
+          const existingId = idMapping.get(message.id)
+          if (existingId) {
+            return {
+              ...message,
+              cancel: undefined,
+              id: existingId,
+            }
+          }
+
+          const copiedMessage = copyMessage(message)
+          idMapping.set(message.id, copiedMessage.id)
+          pendingForkIds.push(message.id)
+          return copiedMessage
+        })
+
+        return {
+          ...list,
+          id: uuidv4(),
+          messages,
+        }
+      }),
+    }
+  }
+
+  return Object.keys(copiedForks).length > 0 ? copiedForks : undefined
+}
+
+export function copyThreadsWithMapping(
+  source?: SessionThread[],
+  externalIdMapping?: Map<string, string>
+): {
+  threads: SessionThread[] | undefined
+  idMapping: Map<string, string>
+} {
+  const idMapping = new Map(externalIdMapping)
+  if (!source) {
+    return {
+      threads: undefined,
+      idMapping,
+    }
+  }
+
+  const threads = source.map((thread) => {
     // Use copyMessagesWithMapping for thread messages
     const { messages: newMessages, idMapping: threadIdMapping } = copyMessagesWithMapping(thread.messages)
 
     // Combine external mapping (if provided) with thread mapping
-    const combinedMapping = idMapping ? new Map([...idMapping, ...threadIdMapping]) : threadIdMapping
+    const combinedMapping = new Map([...idMapping, ...threadIdMapping])
 
     // Map compactionPoints (if they exist)
     const newCompactionPoints = thread.compactionPoints
@@ -168,6 +283,10 @@ export function copyThreads(source?: SessionThread[], idMapping?: Map<string, st
       })
       .filter((cp): cp is NonNullable<typeof cp> => cp !== null)
 
+    for (const [oldId, newId] of threadIdMapping) {
+      idMapping.set(oldId, newId)
+    }
+
     return {
       ...thread,
       messages: newMessages,
@@ -177,6 +296,18 @@ export function copyThreads(source?: SessionThread[], idMapping?: Map<string, st
       compactionPoints: newCompactionPoints?.length ? newCompactionPoints : thread.compactionPoints ? [] : undefined,
     }
   })
+
+  return {
+    threads,
+    idMapping,
+  }
+}
+
+export function copyThreads(source?: SessionThread[], idMapping?: Map<string, string>): SessionThread[] | undefined {
+  if (!source) {
+    return undefined
+  }
+  return copyThreadsWithMapping(source, idMapping).threads
 }
 
 // RAG related types
@@ -219,6 +350,67 @@ export interface KnowledgeBaseSearchResult {
   chunkIndex: number
 }
 
+export type SessionAttachmentAvailability = 'allowed' | 'blocked'
+export type SessionAttachmentIndexStatus = 'pending' | 'indexing' | 'ready' | 'failed'
+export type SessionAttachmentStatus = SessionAttachmentIndexStatus
+export type SessionAttachmentIndexingStage = 'queued' | 'chunking' | 'embedding' | 'finalizing' | 'ready'
+
+export interface SessionAttachmentQueryPlan {
+  recallTopK: number
+  finalTopK: number
+  rerank?: {
+    enabled: boolean
+    model?: string
+  }
+}
+
+export interface SessionAttachment {
+  id: number
+  sessionId: string
+  messageId: string
+  attachmentStorageKey: string
+  filename: string
+  mimeType: string
+  fileSize: number
+  tokenEstimate: number
+  chunkCount?: number
+  totalChunks?: number
+  embeddedChunks?: number
+  indexingStage?: SessionAttachmentIndexingStage
+  parserType?: string
+  availability: SessionAttachmentAvailability
+  indexStatus: SessionAttachmentIndexStatus
+  status: SessionAttachmentStatus
+  error?: string
+  createdAt?: number
+  processingStartedAt?: number
+  completedAt?: number
+}
+
+export interface SessionAttachmentSearchResult {
+  attachmentId: number
+  parentId: number
+  filename: string
+  sectionPath?: string
+  chunkOrder: number
+  text: string
+  score: number
+}
+
+export interface SessionAttachmentParent {
+  id: number
+  attachmentId: number
+  filename: string
+  sectionPath?: string
+  docType?: string
+  pageStart?: number
+  pageEnd?: number
+  parentOrder: number
+  text: string
+  tokenEstimate: number
+  charCount: number
+}
+
 export type FileMeta = {
   name: string
   path: string
@@ -229,3 +421,5 @@ export type FileMeta = {
 export * from './types/image-generation'
 export * from './types/session'
 export * from './types/settings'
+export * from './types/skills'
+export * from './types/task-session'

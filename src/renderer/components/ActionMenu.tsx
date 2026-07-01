@@ -13,6 +13,7 @@ export type ActionMenuItemProps =
       text: string
       icon?: React.ElementType<IconProps>
       color?: MenuItemProps['color']
+      disabled?: boolean
       onClick?: MouseEventHandler<HTMLButtonElement>
       doubleCheck?:
         | boolean
@@ -70,6 +71,7 @@ const DesktopActionMenu: FC<ActionMenuProps> = ({
               doubleCheckText={item.doubleCheck === true ? undefined : item.doubleCheck.text}
               doubleCheckIcon={item.doubleCheck === true ? undefined : item.doubleCheck.icon}
               doubleCheckColor={item.doubleCheck === true ? undefined : item.doubleCheck.color}
+              disabled={item.disabled}
               onClick={item.onClick}
             />
           ) : (
@@ -77,6 +79,7 @@ const DesktopActionMenu: FC<ActionMenuProps> = ({
               key={`${item.text}${index}`}
               leftSection={item.icon ? <ScalableIcon icon={item.icon} size={14} /> : undefined}
               color={item.color || 'chatbox-primary'}
+              disabled={item.disabled}
               style={{
                 color: theme.variantColorResolver({ color: item.color || 'chatbox-primary', theme, variant: 'light' })
                   .color,
@@ -96,9 +99,9 @@ const MobileActionMenu: FC<ActionMenuProps> = ({ children, items, title }) => {
   const [open, setOpen] = useState(false)
 
   const handleItemClick = (onClick?: MouseEventHandler<HTMLButtonElement>) => {
-    return (e: React.MouseEvent<HTMLButtonElement>) => {
+    return async (e: React.MouseEvent<HTMLButtonElement>) => {
       if (onClick) {
-        onClick(e)
+        await onClick(e)
       }
       setOpen(false)
     }
@@ -131,6 +134,7 @@ const MobileActionMenu: FC<ActionMenuProps> = ({ children, items, title }) => {
                   <button
                     key={`${item.text}${index}`}
                     onClick={handleItemClick(item.onClick)}
+                    disabled={item.disabled}
                     className="border-0 bg-transparent p-2.5"
                   >
                     <Text span lineClamp={1} fw={600} c={item.color || 'chatbox-primary'}>
@@ -150,9 +154,11 @@ const MobileActionMenu: FC<ActionMenuProps> = ({ children, items, title }) => {
 
 const MobileDoubleCheckMenuItem: FC<{
   item: Extract<ActionMenuItemProps, { divider?: false }>
-  onConfirm?: (e: React.MouseEvent<HTMLButtonElement>) => void
+  onConfirm?: (e: React.MouseEvent<HTMLButtonElement>) => void | Promise<void>
 }> = ({ item, onConfirm }) => {
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const confirmingRef = useRef(false)
   const { t } = useTranslation()
 
   if (!item.doubleCheck) return null
@@ -164,7 +170,7 @@ const MobileDoubleCheckMenuItem: FC<{
   return (
     <Drawer.NestedRoot noBodyStyles open={confirmOpen} onOpenChange={setConfirmOpen}>
       <Drawer.Trigger asChild>
-        <button className="border-0 bg-transparent p-2.5">
+        <button className="border-0 bg-transparent p-2.5" disabled={item.disabled}>
           <Text
             span
             lineClamp={1}
@@ -183,8 +189,17 @@ const MobileDoubleCheckMenuItem: FC<{
             <Stack className="px-2" gap={0}>
               <Drawer.Close asChild>
                 <button
-                  onClick={(e) => {
-                    onConfirm?.(e)
+                  disabled={confirming || item.disabled}
+                  onClick={async (e) => {
+                    if (confirmingRef.current) return
+                    confirmingRef.current = true
+                    setConfirming(true)
+                    try {
+                      await onConfirm?.(e)
+                    } finally {
+                      confirmingRef.current = false
+                      setConfirming(false)
+                    }
                   }}
                   className="border-0 bg-transparent p-2.5"
                 >
@@ -235,6 +250,8 @@ const DoubleCheckMenuItem = ({
 } & MenuItemProps) => {
   const { t } = useTranslation()
   const [showConfirm, setShowConfirm] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const confirmingRef = useRef(false)
   useEffect(() => {
     if (showConfirm) {
       const tid = setTimeout(() => {
@@ -264,7 +281,19 @@ const DoubleCheckMenuItem = ({
   ) : (
     <Menu.Item
       leftSection={<ScalableIcon icon={doubleCheckIcon || IconCheck} size={14} />}
-      onClick={onClick}
+      disabled={confirming}
+      onClick={async (event) => {
+        if (confirmingRef.current) return
+        confirmingRef.current = true
+        setConfirming(true)
+        try {
+          await onClick?.(event)
+        } finally {
+          confirmingRef.current = false
+          setConfirming(false)
+          setShowConfirm(false)
+        }
+      }}
       {...menuItemProps}
       color={doubleCheckColor ?? menuItemProps.color}
       style={{

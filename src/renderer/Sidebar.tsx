@@ -3,6 +3,7 @@ import SwipeableDrawer from '@mui/material/SwipeableDrawer'
 import {
   IconCirclePlus,
   IconCode,
+  IconDownload,
   IconHelpCircle,
   IconInfoCircle,
   IconLayoutSidebarLeftCollapse,
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import Divider from './components/common/Divider'
 import { ScalableIcon } from './components/common/ScalableIcon'
+import SessionAttachmentRagDevPane from './components/dev/SessionAttachmentRagDevPane'
 import ThemeSwitchButton from './components/dev/ThemeSwitchButton'
 import SessionList from './components/session/SessionList'
 import TaskSessionList from './components/session/TaskSessionList'
@@ -31,7 +33,8 @@ import icon from './static/icon.png'
 import { settingsStore, useLanguage } from './stores/settingsStore'
 import { taskSessionStore } from './stores/taskSessionStore'
 import { useUIStore } from './stores/uiStore'
-import { CHATBOX_BUILD_PLATFORM } from './variables'
+import { installUpdate, useUpdateStore } from './stores/updateStore'
+import { CHATBOX_BUILD_PLATFORM, CHATBOX_BUILD_TARGET } from './variables'
 
 export default function Sidebar() {
   const { t } = useTranslation()
@@ -51,8 +54,11 @@ export default function Sidebar() {
   const isSmallScreen = useIsSmallScreen()
 
   const [isResizing, setIsResizing] = useState(false)
+  const [showDevPane, setShowDevPane] = useState(false)
   const resizeStartX = useRef<number>(0)
   const resizeStartWidth = useRef<number>(0)
+  const showDebugDevPane =
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true'
 
   const { needRoomForMacWindowControls } = useNeedRoomForMacWinControls()
 
@@ -153,12 +159,7 @@ export default function Sidebar() {
         {needRoomForMacWindowControls && <Box className="title-bar flex-[0_0_44px]" />}
         <Flex align="center" justify="space-between" px="md" py="sm">
           <Flex align="center" gap="sm">
-            <Flex
-              align="center"
-              gap="sm"
-              onClick={() => platform.openLink('https://chatboxai.app/')}
-              style={{ cursor: 'pointer' }}
-            >
+            <Flex align="center" gap="sm" onClick={() => navigate({ to: '/about' })} style={{ cursor: 'pointer' }}>
               <Image src={icon} w={20} h={20} />
               <Text span c="chatbox-secondary" size="xl" lh={1.2} fw="700">
                 Chatbox
@@ -217,6 +218,8 @@ export default function Sidebar() {
         ) : (
           <SessionList sessionListViewportRef={sessionListViewportRef} />
         )}
+
+        <SidebarUpdateBanner />
 
         <Stack gap={0} px="xs" pb="xs">
           <Divider />
@@ -287,18 +290,7 @@ export default function Sidebar() {
                 <ScalableIcon icon={IconSettingsFilled} size={20} />
               </ActionIcon>
 
-              {/* <Text
-                c="chatbox-tertiary"
-                size="sm"
-                ml="auto"
-                className="cursor-pointer"
-                onClick={() => {
-                  navigate({ to: '/about' })
-                  setShowSidebar(false)
-                }}
-              >
-                {`${t('About')} ${/\d/.test(versionHook.version) ? `(${versionHook.version})` : ''}`}
-              </Text> */}
+              <SmallScreenAboutIcon versionHook={versionHook} navigate={navigate} setShowSidebar={setShowSidebar} />
             </Flex>
           ) : (
             <>
@@ -349,22 +341,7 @@ export default function Sidebar() {
                   p="xs"
                 />
               )}
-              <NavLink
-                c="chatbox-tertiary"
-                className="rounded"
-                label={
-                  <Flex align="center" gap={6}>
-                    <span>{`${t('About')} ${/\d/.test(versionHook.version) ? `(${versionHook.version})` : ''}`}</span>
-                    {CHATBOX_BUILD_PLATFORM === 'android' && versionHook.needCheckUpdate && (
-                      <Box w={8} h={8} miw={8} bg="chatbox-brand" style={{ borderRadius: '50%' }} />
-                    )}
-                  </Flex>
-                }
-                leftSection={<ScalableIcon icon={IconInfoCircle} size={20} />}
-                onClick={() => navigate({ to: '/about' })}
-                variant="light"
-                p="xs"
-              />
+              <AboutNavLink versionHook={versionHook} navigate={navigate} />
             </>
           )}
         </Stack>
@@ -377,7 +354,131 @@ export default function Sidebar() {
             )}
           />
         )}
+        {showDebugDevPane && (
+          <>
+            <Button
+              size="xs"
+              variant="filled"
+              color="dark"
+              leftSection={<ScalableIcon icon={IconCode} size={14} />}
+              className={clsx('absolute z-[2] shadow-md', isSmallScreen ? 'bottom-20 right-3' : 'bottom-3 right-3')}
+              onClick={() => setShowDevPane(true)}
+            >
+              Dev
+            </Button>
+            <SessionAttachmentRagDevPane opened={showDevPane} onClose={() => setShowDevPane(false)} />
+          </>
+        )}
       </Stack>
     </SwipeableDrawer>
+  )
+}
+
+/**
+ * Desktop: shows update banner when an update is downloaded and ready to install.
+ * Not shown on mobile (mobile uses dot indicator on About link).
+ */
+function SidebarUpdateBanner() {
+  const isMobile = CHATBOX_BUILD_TARGET === 'mobile_app'
+  if (isMobile) return null
+  return <SidebarUpdateBannerInner />
+}
+
+function SidebarUpdateBannerInner() {
+  const { t } = useTranslation()
+  const updateStatus = useUpdateStore((s) => s.status)
+  const updateVersion = useUpdateStore((s) => s.version)
+
+  if (updateStatus !== 'downloaded') return null
+
+  return (
+    <Box px="xs" pb={4}>
+      <Flex
+        align="center"
+        gap="xs"
+        px="sm"
+        py={6}
+        className="rounded-md cursor-pointer bg-chatbox-background-brand-secondary"
+        onClick={installUpdate}
+      >
+        <ScalableIcon icon={IconDownload} size={16} className="text-chatbox-brand flex-shrink-0" />
+        <Text size="sm" c="chatbox-brand" lineClamp={1} flex={1}>
+          {`${t('Update ready to install')}${updateVersion ? ` (v${updateVersion})` : ''}`}
+        </Text>
+      </Flex>
+    </Box>
+  )
+}
+
+/**
+ * About NavLink with update dot indicator.
+ * Desktop: shows dot when electron-updater detects update (downloaded/available).
+ * Mobile: shows dot when remote API says needCheckUpdate.
+ */
+function useShowUpdateDot(versionHook: ReturnType<typeof useVersion>) {
+  const updateStatus = useUpdateStore((s) => s.status)
+  const isMobile = CHATBOX_BUILD_TARGET === 'mobile_app'
+  return isMobile ? versionHook.needCheckUpdate : updateStatus === 'downloaded'
+}
+
+function AboutNavLink({
+  versionHook,
+  navigate,
+}: {
+  versionHook: ReturnType<typeof useVersion>
+  navigate: ReturnType<typeof useNavigate>
+}) {
+  const { t } = useTranslation()
+  const showDot = useShowUpdateDot(versionHook)
+
+  return (
+    <NavLink
+      c="chatbox-tertiary"
+      className="rounded"
+      label={
+        <Flex align="center" gap={6}>
+          <span>{`${t('About')} ${/\d/.test(versionHook.version) ? `(${versionHook.version})` : ''}`}</span>
+          {showDot && <Box w={8} h={8} miw={8} bg="chatbox-brand" style={{ borderRadius: '50%' }} />}
+        </Flex>
+      }
+      leftSection={<ScalableIcon icon={IconInfoCircle} size={20} />}
+      onClick={() => navigate({ to: '/about' })}
+      variant="light"
+      p="xs"
+    />
+  )
+}
+
+/**
+ * Small screen About icon with dot indicator for mobile.
+ */
+function SmallScreenAboutIcon({
+  versionHook,
+  navigate,
+  setShowSidebar,
+}: {
+  versionHook: ReturnType<typeof useVersion>
+  navigate: ReturnType<typeof useNavigate>
+  setShowSidebar: (v: boolean) => void
+}) {
+  const showDot = useShowUpdateDot(versionHook)
+
+  return (
+    <Box className="relative">
+      <ActionIcon
+        variant="transparent"
+        color="chatbox-secondary"
+        size={24}
+        onClick={() => {
+          navigate({ to: '/about' })
+          setShowSidebar(false)
+        }}
+      >
+        <ScalableIcon icon={IconInfoCircle} size={20} />
+      </ActionIcon>
+      {showDot && (
+        <Box w={8} h={8} bg="chatbox-brand" className="absolute -top-0.5 -right-0.5" style={{ borderRadius: '50%' }} />
+      )}
+    </Box>
   )
 }

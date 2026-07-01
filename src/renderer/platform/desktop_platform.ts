@@ -6,12 +6,16 @@ import { cache } from '@shared/utils/cache'
 import localforage from 'localforage'
 import { v4 as uuidv4 } from 'uuid'
 import { parseLocale } from '@/i18n/parser'
+import { getLogger } from '@/lib/utils'
 import { type ImageGenerationStorage, IndexedDBImageGenerationStorage } from '@/storage/ImageGenerationStorage'
+import { IndexedDBSessionMetaStorage, type SessionMetaStorage } from '@/storage/SessionMetaStorage'
+import { IndexedDBTaskSessionStorage, type TaskSessionStorage } from '@/storage/TaskSessionStorage'
+import { rememberFileNativePath } from '@/utils/file-native-path'
 import { getOS } from '../packages/navigator'
 import type { Platform, PlatformType } from './interfaces'
 import DesktopKnowledgeBaseController from './knowledge-base/desktop-controller'
+import DesktopSessionAttachmentRagController from './session-attachment-rag/desktop-controller'
 import WebExporter from './web_exporter'
-import { getLogger } from '@/lib/utils'
 import { parseTextFileLocally } from './web_platform_utils'
 import { googleAuthStore } from '@/stores/googleAuthStore'
 
@@ -25,7 +29,10 @@ export default class DesktopPlatform implements Platform {
   public exporter = new WebExporter()
 
   private _kbController?: DesktopKnowledgeBaseController
+  private _sessionAttachmentRagController?: DesktopSessionAttachmentRagController
   private _imageGenerationStorage: ImageGenerationStorage | null = null
+  private _taskSessionStorage: TaskSessionStorage | null = null
+  private _sessionMetaStorage: SessionMetaStorage | null = null
 
   public ipc: ElectronIPC
   constructor(ipc: ElectronIPC) {
@@ -59,6 +66,29 @@ export default class DesktopPlatform implements Platform {
   }
   public onUpdateDownloaded(callback: () => void): () => void {
     return this.ipc.onUpdateDownloaded(callback)
+  }
+  public onUpdaterChecking(callback: () => void): () => void {
+    return this.ipc.onUpdaterChecking(callback)
+  }
+  public onUpdaterAvailable(callback: (data: { version: string }) => void): () => void {
+    return this.ipc.onUpdaterAvailable(callback)
+  }
+  public onUpdaterNotAvailable(callback: () => void): () => void {
+    return this.ipc.onUpdaterNotAvailable(callback)
+  }
+  public onUpdaterProgress(
+    callback: (data: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void
+  ): () => void {
+    return this.ipc.onUpdaterProgress(callback)
+  }
+  public onUpdaterDownloaded(callback: (data: { version: string }) => void): () => void {
+    return this.ipc.onUpdaterDownloaded(callback)
+  }
+  public onUpdaterError(callback: (data: { message: string }) => void): () => void {
+    return this.ipc.onUpdaterError(callback)
+  }
+  public async checkForUpdate(): Promise<{ started: boolean }> {
+    return this.ipc.invoke('updater:check')
   }
   public onNavigate(callback: (path: string) => void): () => void {
     return window.electronAPI.onNavigate(callback)
@@ -107,8 +137,9 @@ export default class DesktopPlatform implements Platform {
     let valueJson: string
     try {
       valueJson = JSON.stringify(value)
-    } catch (error: any) {
-      throw new Error(`Failed to serialize value for key "${key}": ${error.message}`)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to serialize value for key "${key}": ${message}`)
     }
     if (this.needStoreInFile(key)) {
       return this.ipc.invoke('setStoreValue', key, valueJson)
@@ -209,15 +240,16 @@ export default class DesktopPlatform implements Platform {
 
   async parseFileLocally(file: File): Promise<{ key?: string; isSupported: boolean }> {
     let result: { text: string; isSupported: boolean }
-    if (!file.path) {
+    const filePath = this.getLocalFilePath(file)
+    if (!filePath) {
       // 复制长文本粘贴的文件是没有 path 的
       result = await parseTextFileLocally(file)
     } else {
-      const resultJSON = await this.ipc.invoke('parseFileLocally', JSON.stringify({ filePath: file.path }))
+      const resultJSON = await this.ipc.invoke('parseFileLocally', JSON.stringify({ filePath }))
       result = JSON.parse(resultJSON)
     }
     if (!result.isSupported) {
-      log.error(`parseFileLocally: unsupported file "${file.name}" (path=${file.path || 'none'})`)
+      log.error(`parseFileLocally: unsupported file "${file.name}" (path=${filePath || 'none'})`)
       return { isSupported: false }
     }
     const key = `parseFile-` + uuidv4()
@@ -225,17 +257,31 @@ export default class DesktopPlatform implements Platform {
     return { key, isSupported: true }
   }
 
+  getLocalFilePath(file: File): string {
+    return rememberFileNativePath(file, this.ipc.getPathForFile(file))
+  }
+
+  async readLocalFileContent(filePath: string): Promise<string | null> {
+    const resultJSON = await this.ipc.invoke('parseFileLocally', JSON.stringify({ filePath }))
+    const result = JSON.parse(resultJSON)
+    if (!result.isSupported) {
+      return null
+    }
+    return result.text || null
+  }
+
   async parseFileWithMineru(
     file: File,
     apiToken: string
   ): Promise<{ success: boolean; content?: string; error?: string; cancelled?: boolean }> {
-    if (!file.path) {
+    const filePath = this.getLocalFilePath(file)
+    if (!filePath) {
       // Files without path (e.g., pasted files) are not supported for MinerU parsing
       return { success: false, error: 'File path is required for MinerU parsing' }
     }
 
     return this.ipc.invoke('parser:parse-file-with-mineru', {
-      filePath: file.path,
+      filePath,
       filename: file.name,
       mimeType: file.type,
       apiToken,
@@ -274,11 +320,84 @@ export default class DesktopPlatform implements Platform {
     return this._kbController
   }
 
+  public getSessionAttachmentRagController() {
+    if (!this._sessionAttachmentRagController) {
+      this._sessionAttachmentRagController = new DesktopSessionAttachmentRagController(this.ipc)
+    }
+    return this._sessionAttachmentRagController
+  }
+
   public getImageGenerationStorage(): ImageGenerationStorage {
     if (!this._imageGenerationStorage) {
       this._imageGenerationStorage = new IndexedDBImageGenerationStorage()
     }
     return this._imageGenerationStorage
+  }
+
+  public getTaskSessionStorage(): TaskSessionStorage {
+    if (!this._taskSessionStorage) {
+      this._taskSessionStorage = new IndexedDBTaskSessionStorage()
+    }
+    return this._taskSessionStorage
+  }
+
+  public getSessionMetaStorage(): SessionMetaStorage {
+    if (!this._sessionMetaStorage) {
+      this._sessionMetaStorage = new IndexedDBSessionMetaStorage()
+    }
+    return this._sessionMetaStorage
+  }
+
+  public async sandboxInit(config: { workingDirectory: string }) {
+    return this.ipc.invoke('sandbox:init', config)
+  }
+
+  public async sandboxExec(params: { command: string; timeout?: number }) {
+    return this.ipc.invoke('sandbox:exec', params)
+  }
+
+  public async sandboxRead(params: { filePath: string }) {
+    return this.ipc.invoke('sandbox:read', params)
+  }
+
+  public async sandboxWrite(params: { filePath: string; content: string }) {
+    return this.ipc.invoke('sandbox:write', params)
+  }
+
+  public async sandboxEdit(params: { filePath: string; search: string; replace: string }) {
+    return this.ipc.invoke('sandbox:edit', params)
+  }
+
+  public async sandboxLs(params: { dirPath: string }) {
+    return this.ipc.invoke('sandbox:ls', params)
+  }
+
+  public async sandboxGrep(params: { pattern: string; dirPath?: string; include?: string }) {
+    return this.ipc.invoke('sandbox:grep', params)
+  }
+
+  public async sandboxFind(params: { dirPath: string; pattern?: string }) {
+    return this.ipc.invoke('sandbox:find', params)
+  }
+
+  public async sandboxKill() {
+    return this.ipc.invoke('sandbox:kill')
+  }
+
+  public async sandboxReset() {
+    return this.ipc.invoke('sandbox:reset')
+  }
+
+  public async sandboxStatus() {
+    return this.ipc.invoke('sandbox:status')
+  }
+
+  public async sandboxCheckAvailability() {
+    return this.ipc.invoke('sandbox:check-availability')
+  }
+
+  public async openDirectoryDialog() {
+    return this.ipc.invoke('dialog:openDirectory')
   }
 
   public minimize() {

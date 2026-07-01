@@ -1,9 +1,15 @@
-import { arrayMove } from '@dnd-kit/sortable'
-import { copyMessagesWithMapping, copyThreads, type Session, type SessionMeta } from '@shared/types'
+import {
+  copyMessageForksWithMapping,
+  copyMessagesWithMapping,
+  copyThreadsWithMapping,
+  type Session,
+  type SessionMeta,
+} from '@shared/types'
 import { getDefaultStore } from 'jotai'
 import { omit } from 'lodash'
 import { router } from '@/router'
-import { sortSessions } from '@/utils/session-utils'
+import platform from '@/platform'
+import { sortSessionRecords } from '@/storage/SessionMetaStorage'
 import * as atoms from '../atoms'
 import * as chatStore from '../chatStore'
 import * as scrollActions from '../scrollActions'
@@ -45,6 +51,7 @@ async function copySession(
     messages?: Session['messages']
     threads?: Session['threads']
     threadName?: Session['threadName']
+    messageForksHash?: Session['messageForksHash']
     compactionPoints?: Session['compactionPoints']
   }
 ) {
@@ -80,12 +87,18 @@ async function copySession(
     })
     .filter((cp): cp is NonNullable<typeof cp> => cp !== null)
 
+  const sourceThreads = 'threads' in sourceMeta ? sourceMeta.threads : source.threads
+  const { threads: newThreads, idMapping: combinedIdMapping } = copyThreadsWithMapping(sourceThreads, idMapping)
+  const sourceMessageForksHash =
+    'messageForksHash' in sourceMeta ? sourceMeta.messageForksHash : source.messageForksHash
+  const newMessageForksHash = copyMessageForksWithMapping(sourceMessageForksHash, combinedIdMapping)
+
   const newSession = {
     ...omit(source, 'id', 'messages', 'threads', 'messageForksHash', 'compactionPoints'),
     ...(sourceMeta.name ? { name: sourceMeta.name } : {}),
     messages: newMessages,
-    threads: sourceMeta.threads ? copyThreads(sourceMeta.threads, idMapping) : copyThreads(source.threads, idMapping),
-    messageForksHash: undefined,
+    threads: newThreads,
+    messageForksHash: newMessageForksHash,
     compactionPoints: newCompactionPoints?.length ? newCompactionPoints : undefined,
     ...(sourceMeta.threadName ? { threadName: sourceMeta.threadName } : {}),
   }
@@ -107,24 +120,56 @@ export function switchCurrentSession(sessionId: string) {
   const store = getDefaultStore()
   store.set(atoms.currentSessionIdAtom, sessionId)
   router.navigate({
-    to: `/session/${sessionId}`,
+    to: '/session/$sessionId',
+    params: { sessionId },
   })
   scrollActions.clearAutoScroll()
 }
 
 /**
- * Reorder sessions in the list
+ * Reorder sessions in the list using fractional indexing.
+ * Computes a new sortOrder for the moved item based on its new neighbors.
  */
 export async function reorderSessions(oldIndex: number, newIndex: number) {
   console.debug('sessionActions', 'reorderSessions', oldIndex, newIndex)
-  await chatStore.updateSessionList((sessions) => {
-    if (!sessions) {
-      throw new Error('Session list not found')
-    }
-    // sortSessions normalizes display order (pinned first, then reversed chronological)
-    // We must apply it both before arrayMove (to match UI indices) and after (to persist correct order)
-    const sortedSessions = sortSessions(sessions)
-    return sortSessions(arrayMove(sortedSessions, oldIndex, newIndex))
+  const sessions = await chatStore.listSessionsMeta()
+  const movedSession = sessions[oldIndex]
+  if (!movedSession || oldIndex === newIndex) return
+  const reorderedSessions = [...sessions]
+  reorderedSessions.splice(oldIndex, 1)
+  reorderedSessions.splice(newIndex, 0, movedSession)
+  const targetSession = reorderedSessions[newIndex]
+  const nextStarred = targetSession?.starred ?? movedSession.starred
+
+  const comparableReordered = reorderedSessions.filter((s) => s.starred === nextStarred)
+  const targetGroupIndex = comparableReordered.findIndex((s) => s.id === movedSession.id)
+  const before = comparableReordered[targetGroupIndex - 1]
+  const after = comparableReordered[targetGroupIndex + 1]
+
+  let newSortOrder: number
+  if (targetGroupIndex < 0 || reorderedSessions.length === 0) {
+    return
+  } else if (!before && !after) {
+    newSortOrder = Date.now()
+  } else if (!before) {
+    newSortOrder = after.sortOrder + 1000
+  } else if (!after) {
+    newSortOrder = before.sortOrder - 1000
+  } else {
+    newSortOrder = (before.sortOrder + after.sortOrder) / 2
+  }
+
+  if (nextStarred !== movedSession.starred) {
+    await chatStore.updateSession(movedSession.id, { starred: nextStarred })
+  }
+
+  const metaStorage = await chatStore.getMetaStorage()
+  await metaStorage.update(movedSession.id, { sortOrder: newSortOrder, starred: nextStarred })
+  chatStore.updateSessionListData((items) => {
+    const updated = items.map((s) =>
+      s.id === movedSession.id ? { ...s, sortOrder: newSortOrder, starred: nextStarred } : s
+    )
+    return sortSessionRecords(updated)
   })
 }
 
@@ -170,21 +215,12 @@ export async function switchToNext(reversed?: boolean) {
  * Clear session list, keeping only specified number of sessions
  */
 async function clearSessionList(keepNum: number) {
-  const sessionMetaList = await chatStore.listSessionsMeta()
+  const sessionMetaList = await chatStore.listAllSessionsMeta()
   const deleted = sessionMetaList?.slice(keepNum)
   if (!deleted?.length) {
     return
   }
-  for (const s of deleted) {
-    await chatStore.deleteSession(s.id)
-  }
-  await chatStore.updateSessionList((sessions) => {
-    if (!sessions) {
-      throw new Error('Session list not found')
-    }
-    return sessions.filter((s) => !deleted?.some((d) => d.id === s.id))
-  })
-
+  await chatStore.deleteSessions(deleted.map((s) => s.id))
   // Navigate to home if the current session was deleted
   const store = getDefaultStore()
   const currentSessionId = store.get(atoms.currentSessionIdAtom)
@@ -207,6 +243,13 @@ export async function clear(sessionId: string) {
   const session = await chatStore.getSession(sessionId)
   if (!session) {
     return
+  }
+  if (platform.type === 'desktop') {
+    try {
+      await platform.getSessionAttachmentRagController().deleteSessionAttachments(sessionId)
+    } catch (error) {
+      console.warn('Failed to cleanup session attachment RAG entries while clearing session:', error)
+    }
   }
   session.messages.forEach((msg) => {
     msg?.cancel?.()

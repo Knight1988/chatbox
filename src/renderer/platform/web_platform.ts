@@ -4,9 +4,12 @@ import localforage from 'localforage'
 import { v4 as uuidv4 } from 'uuid'
 import { parseLocale } from '@/i18n/parser'
 import { type ImageGenerationStorage, IndexedDBImageGenerationStorage } from '@/storage/ImageGenerationStorage'
+import { IndexedDBSessionMetaStorage, type SessionMetaStorage } from '@/storage/SessionMetaStorage'
+import { IndexedDBTaskSessionStorage, type TaskSessionStorage } from '@/storage/TaskSessionStorage'
 import { getBrowser, getOS } from '../packages/navigator'
 import type { Platform, PlatformType } from './interfaces'
 import type { KnowledgeBaseController } from './knowledge-base/interface'
+import type { SessionAttachmentRagController } from './session-attachment-rag/interface'
 import { IndexedDBStorage } from './storages'
 import WebExporter from './web_exporter'
 import webLogger from './web_logger'
@@ -20,6 +23,8 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
   public exporter = new WebExporter()
 
   private imageGenerationStorage: ImageGenerationStorage | null = null
+  private taskSessionStorage: TaskSessionStorage | null = null
+  private sessionMetaStorage: SessionMetaStorage | null = null
 
   constructor() {
     super()
@@ -161,6 +166,10 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
     return { key, isSupported: true }
   }
 
+  getLocalFilePath(file: File): string {
+    return file.path || ''
+  }
+
   public async parseUrl(url: string): Promise<{ key: string; title: string }> {
     throw new Error('Not implemented')
   }
@@ -181,11 +190,29 @@ export default class WebPlatform extends IndexedDBStorage implements Platform {
     throw new Error('Method not implemented.')
   }
 
+  public getSessionAttachmentRagController(): SessionAttachmentRagController {
+    throw new Error('Session attachment RAG is not implemented on web.')
+  }
+
   public getImageGenerationStorage(): ImageGenerationStorage {
     if (!this.imageGenerationStorage) {
       this.imageGenerationStorage = new IndexedDBImageGenerationStorage()
     }
     return this.imageGenerationStorage
+  }
+
+  public getTaskSessionStorage(): TaskSessionStorage {
+    if (!this.taskSessionStorage) {
+      this.taskSessionStorage = new IndexedDBTaskSessionStorage()
+    }
+    return this.taskSessionStorage
+  }
+
+  public getSessionMetaStorage(): SessionMetaStorage {
+    if (!this.sessionMetaStorage) {
+      this.sessionMetaStorage = new IndexedDBSessionMetaStorage()
+    }
+    return this.sessionMetaStorage
   }
 
   public minimize() {

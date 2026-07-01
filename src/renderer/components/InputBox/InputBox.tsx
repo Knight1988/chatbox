@@ -19,6 +19,7 @@ import {
   getUnsupportedFileType,
   isSupportedFile,
 } from '@shared/file-extensions'
+import { KNOWLEDGE_BASE_MAX_FILE_SIZE, KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL } from '@shared/knowledge-base'
 import { getModel } from '@shared/providers'
 import { formatNumber } from '@shared/utils'
 import {
@@ -47,6 +48,7 @@ import type React from 'react'
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useTranslation } from 'react-i18next'
+import { v4 as uuidv4 } from 'uuid'
 import { createModelDependencies } from '@/adapters'
 import useInputBoxHistory from '@/hooks/useInputBoxHistory'
 import { useKnowledgeBase } from '@/hooks/useKnowledgeBase'
@@ -83,13 +85,18 @@ import {
   type KnowledgeBase,
   type Message,
   ModelProviderEnum,
+  type SessionAttachment,
+  type SessionAttachmentIndexingStage,
   type SessionType,
   type ShortcutSendValue,
 } from '../../../shared/types'
 import * as dom from '../../hooks/dom'
+import { startPreparedSessionAttachmentIndexing } from '../../stores/sessionAttachmentRagIndexing'
 import * as sessionHelpers from '../../stores/sessionHelpers'
 import * as toastActions from '../../stores/toastActions'
+import type { PreprocessedFile } from '../../types/input-box'
 import { CompactionStatus } from '../chat/CompactionStatus'
+import { AdaptiveModal } from '../common/AdaptiveModal'
 import { CompressionModal } from '../common/CompressionModal'
 import { ScalableIcon } from '../common/ScalableIcon'
 import Disclaimer from '../Disclaimer'
@@ -136,6 +143,76 @@ export type InputBoxProps = {
   onStartNewThread?(): boolean
   onRollbackThread?(): boolean
   onClickSessionSettings?(): boolean | Promise<boolean>
+}
+
+function mergeSessionAttachmentStatesIntoFiles(
+  files: PreprocessedFile[],
+  attachments: SessionAttachment[]
+): { files: PreprocessedFile[]; changed: boolean } {
+  if (files.length === 0 || attachments.length === 0) {
+    return { files, changed: false }
+  }
+
+  const attachmentStateMap = new Map(attachments.map((attachment) => [attachment.id, attachment]))
+  let changed = false
+  const nextFiles = files.map((file) => {
+    if (!file.sessionAttachmentId) {
+      return file
+    }
+    const attachment = attachmentStateMap.get(file.sessionAttachmentId)
+    if (!attachment) {
+      return file
+    }
+    const nextFile = {
+      ...file,
+      sessionAttachmentAvailability: attachment.availability ?? file.sessionAttachmentAvailability,
+      sessionAttachmentIndexStatus: attachment.indexStatus ?? file.sessionAttachmentIndexStatus,
+      sessionAttachmentChunkCount: attachment.chunkCount ?? file.sessionAttachmentChunkCount,
+      sessionAttachmentTotalChunks: attachment.totalChunks ?? file.sessionAttachmentTotalChunks,
+      sessionAttachmentEmbeddedChunks: attachment.embeddedChunks ?? file.sessionAttachmentEmbeddedChunks,
+      sessionAttachmentIndexingStage: attachment.indexingStage ?? file.sessionAttachmentIndexingStage,
+      error: attachment.error ?? file.error,
+    }
+    const fileChanged =
+      nextFile.sessionAttachmentAvailability !== file.sessionAttachmentAvailability ||
+      nextFile.sessionAttachmentIndexStatus !== file.sessionAttachmentIndexStatus ||
+      nextFile.sessionAttachmentChunkCount !== file.sessionAttachmentChunkCount ||
+      nextFile.sessionAttachmentTotalChunks !== file.sessionAttachmentTotalChunks ||
+      nextFile.sessionAttachmentEmbeddedChunks !== file.sessionAttachmentEmbeddedChunks ||
+      nextFile.sessionAttachmentIndexingStage !== file.sessionAttachmentIndexingStage ||
+      nextFile.error !== file.error
+    if (fileChanged) {
+      changed = true
+    }
+    return fileChanged ? nextFile : file
+  })
+
+  return { files: nextFiles, changed }
+}
+
+function getSessionAttachmentProgressValue(embeddedChunks?: number, totalChunks?: number): number | undefined {
+  if (!totalChunks || totalChunks <= 0 || embeddedChunks === undefined) return undefined
+  return Math.max(0, Math.min(100, Math.round((embeddedChunks / totalChunks) * 100)))
+}
+
+function getSessionAttachmentStageLabel(
+  stage: SessionAttachmentIndexingStage | undefined,
+  t: (key: string) => string
+): string {
+  switch (stage) {
+    case 'queued':
+      return t('Queued')
+    case 'chunking':
+      return t('Preparing')
+    case 'embedding':
+      return t('Indexing')
+    case 'finalizing':
+      return t('Finishing')
+    case 'ready':
+      return t('Indexed')
+    default:
+      return t('Indexing')
+  }
 }
 
 const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
@@ -196,12 +273,45 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       [currentSessionId, setSessionWebBrowsing]
     )
 
-    const { messageInput, setMessageInput, clearDraft } = useMessageInput('', { isNewSession })
+    // messageInput lives inside the MessageInputField child component to avoid
+    // re-rendering the entire InputBox (20+ hooks, 1300+ lines) on every keystroke.
+    // The parent only keeps a ref to the latest text and a boolean for empty/non-empty.
+    const messageInputFieldRef = useRef<MessageInputFieldRef>(null)
+    const latestInputRef = useRef('')
+    const [hasTextContent, setHasTextContent] = useState(false)
+    const draftMessageIdRef = useRef<string | undefined>(undefined)
+
+    const debouncedUpdateTimerRef = useRef<ReturnType<typeof setTimeout>>()
+    const resetHistoryIndexRef = useRef<() => void>(() => {})
+
+    // Called only on real user typing (not programmatic setValue), to avoid resetting history navigation
+    const onUserInput = useCallback(() => {
+      resetHistoryIndexRef.current()
+    }, [])
+
+    const onMessageInputValueChange = useCallback((value: string) => {
+      latestInputRef.current = value
+      const hasContent = value.trim().length > 0
+      setHasTextContent((prev) => {
+        if (prev === hasContent) return prev
+        return hasContent
+      })
+      // Schedule debounced pre-constructed message update
+      clearTimeout(debouncedUpdateTimerRef.current)
+      debouncedUpdateTimerRef.current = setTimeout(() => flushRef.current(), 300)
+    }, [])
 
     // Pre-constructed message state (scoped by session)
     const [preConstructedMessage, setPreConstructedMessage] = useAtom(
       atoms.inputBoxPreConstructedMessageFamily(currentSessionId || 'new')
     )
+    const preConstructedMessageRef = useRef(preConstructedMessage)
+    preConstructedMessageRef.current = preConstructedMessage
+    const activeFilePreprocessingKeysRef = useRef(new Set<string>())
+    const inputFileKeyByFileRef = useRef(new WeakMap<File, string>())
+    useEffect(() => {
+      draftMessageIdRef.current = preConstructedMessage.draftMessageId
+    }, [preConstructedMessage.draftMessageId])
     const pictureKeys = preConstructedMessage.pictureKeys || []
     const attachments = preConstructedMessage.attachments || []
 
@@ -223,24 +333,31 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
 
     const [links, setLinks] = useAtom(atoms.inputBoxLinksFamily(currentSessionId || 'new'))
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [unreadyAttachmentSubmitPrompt, setUnreadyAttachmentSubmitPrompt] = useState<{
+      opened: boolean
+      count: number
+    }>({ opened: false, count: 0 })
 
-    useEffect(() => {
+    const flushPreConstructedMessage = useCallback(() => {
+      clearTimeout(debouncedUpdateTimerRef.current)
+      const text = latestInputRef.current
       const constructedMessage = sessionHelpers.constructUserMessage(
-        messageInput,
+        preConstructedMessage.draftMessageId,
+        text,
         pictureKeys,
         preConstructedMessage.preprocessedFiles,
         preConstructedMessage.preprocessedLinks
       )
       setPreConstructedMessage((prev) => ({
         ...prev,
-        text: messageInput,
+        text,
         pictureKeys,
         attachments,
         links,
         message: constructedMessage,
       }))
     }, [
-      messageInput,
+      preConstructedMessage.draftMessageId,
       pictureKeys,
       attachments,
       links,
@@ -248,6 +365,14 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       preConstructedMessage.preprocessedLinks,
       setPreConstructedMessage,
     ])
+
+    const flushRef = useRef(flushPreConstructedMessage)
+    flushRef.current = flushPreConstructedMessage
+
+    // When non-text deps change (pictures, attachments, links), flush immediately
+    useEffect(() => {
+      flushRef.current()
+    }, [flushPreConstructedMessage])
 
     const pictureInputRef = useRef<HTMLInputElement | null>(null)
     const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -274,12 +399,99 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       return hasErrorFiles || hasErrorLinks
     }, [preConstructedMessage.preprocessingStatus])
 
+    const hasBlockedSessionRagFiles = useMemo(
+      () =>
+        preConstructedMessage.preprocessedFiles.some(
+          (file) => file.ragMode === 'session-retrieval' && file.sessionAttachmentAvailability === 'blocked'
+        ),
+      [preConstructedMessage.preprocessedFiles]
+    )
+    const hasSessionRetrievalFiles = useMemo(
+      () =>
+        preConstructedMessage.preprocessedFiles.some(
+          (file) => file.ragMode === 'session-retrieval' && file.sessionAttachmentAvailability !== 'blocked'
+        ),
+      [preConstructedMessage.preprocessedFiles]
+    )
+    const hasLargeAttachmentWarning = useMemo(
+      () =>
+        preConstructedMessage.preprocessedFiles.some(
+          (file) =>
+            file.sessionAttachmentWarningReason === sessionHelpers.SESSION_ATTACHMENT_RAG_LARGE_ATTACHMENT_WARNING
+        ),
+      [preConstructedMessage.preprocessedFiles]
+    )
+
     const disableSubmit = useMemo(
-      () => !(messageInput.trim() || links?.length || attachments?.length || pictureKeys?.length),
-      [messageInput, links, attachments, pictureKeys]
+      () => !(hasTextContent || links?.length || attachments?.length || pictureKeys?.length),
+      [hasTextContent, links, attachments, pictureKeys]
     )
 
     const { providers } = useProviders()
+    const preprocessedSessionAttachmentIds = useMemo(
+      () =>
+        Array.from(
+          new Set(
+            preConstructedMessage.preprocessedFiles.flatMap((file) =>
+              file.sessionAttachmentId ? [file.sessionAttachmentId] : []
+            )
+          )
+        ),
+      [preConstructedMessage.preprocessedFiles]
+    )
+    const { data: preprocessedAttachmentStates = [] } = useQuery<SessionAttachment[]>({
+      queryKey: [
+        'input-box-session-attachment-rag-attachments',
+        ...preprocessedSessionAttachmentIds.sort((a, b) => a - b),
+      ],
+      queryFn: () => {
+        if (platform.type !== 'desktop' || preprocessedSessionAttachmentIds.length === 0) {
+          return []
+        }
+        return platform.getSessionAttachmentRagController().getAttachments(preprocessedSessionAttachmentIds)
+      },
+      enabled: platform.type === 'desktop' && preprocessedSessionAttachmentIds.length > 0,
+      refetchInterval: (query): number | false => {
+        const attachments = (query.state.data as SessionAttachment[] | undefined) ?? []
+        return attachments.some(
+          (attachment) => attachment.indexStatus === 'pending' || attachment.indexStatus === 'indexing'
+        )
+          ? 1500
+          : false
+      },
+    })
+    const preprocessedAttachmentIndexStatusMap = useMemo(
+      () => new Map(preprocessedAttachmentStates.map((attachment) => [attachment.id, attachment.indexStatus])),
+      [preprocessedAttachmentStates]
+    )
+    const preprocessedAttachmentErrorMap = useMemo(
+      () => new Map(preprocessedAttachmentStates.map((attachment) => [attachment.id, attachment.error])),
+      [preprocessedAttachmentStates]
+    )
+    const preprocessedAttachmentProgressMap = useMemo(
+      () =>
+        new Map(
+          preprocessedAttachmentStates.map((attachment) => [
+            attachment.id,
+            {
+              totalChunks: attachment.totalChunks ?? 0,
+              embeddedChunks: attachment.embeddedChunks ?? 0,
+              indexingStage: attachment.indexingStage,
+              processingStartedAt: attachment.processingStartedAt,
+            },
+          ])
+        ),
+      [preprocessedAttachmentStates]
+    )
+    useEffect(() => {
+      if (preprocessedAttachmentStates.length === 0) {
+        return
+      }
+      setPreConstructedMessage((prev) => {
+        const result = mergeSessionAttachmentStatesIntoFiles(prev.preprocessedFiles, preprocessedAttachmentStates)
+        return result.changed ? { ...prev, preprocessedFiles: result.files } : prev
+      })
+    }, [preprocessedAttachmentStates, setPreConstructedMessage])
     const modelSelectorDisplayText = useMemo(() => {
       if (!model) {
         return t('Select Model')
@@ -300,7 +512,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
     }, [providers, model])
 
     // Check if model supports tool use for files
-    const { data: modelSupportToolUseForFile = false } = useQuery({
+    const { data: modelSupportToolUseForFile = false, isFetched: isModelToolCapabilityFetched } = useQuery({
       queryKey: ['model-tool-capability', model?.provider, model?.modelId],
       queryFn: async () => {
         if (!model?.provider || !model?.modelId) {
@@ -329,6 +541,8 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       staleTime: 5 * 60 * 1000,
       gcTime: 10 * 60 * 1000,
     })
+    const showSessionRetrievalToolWarning =
+      hasSessionRetrievalFiles && isModelToolCapabilityFetched && !modelSupportToolUseForFile
 
     // Calculate token counts using unified cache layer
     const { contextTokens, currentInputTokens, totalTokens, isCalculating, pendingTasks, messageCount } =
@@ -439,32 +653,41 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       }
     }, [showRollbackThreadButton])
 
-    const inputRef = useRef<HTMLTextAreaElement | null>(null)
-
     useImperativeHandle(
       ref,
       () => ({
         // 暂时并没有用到，还是使用了之前atom的方案
         setQuote: (data) => {
-          setMessageInput((prev) => `${prev}\n\n${data}`)
+          messageInputFieldRef.current?.setValue((prev) => `${prev}\n\n${data}`)
           dom.focusMessageInput()
           dom.setMessageInputCursorToEnd()
         },
       }),
-      [setMessageInput]
+      []
     )
 
     const { addInputBoxHistory, getPreviousHistoryInput, getNextHistoryInput, resetHistoryIndex } = useInputBoxHistory()
+    resetHistoryIndexRef.current = resetHistoryIndex
+
+    type SubmitOptions = { allowUnreadySessionAttachments?: boolean }
+    const handleSubmitRef = useRef<(needGenerating?: boolean, options?: SubmitOptions) => void>(() => {})
+    const getPreviousHistoryInputRef = useRef(getPreviousHistoryInput)
+    getPreviousHistoryInputRef.current = getPreviousHistoryInput
+    const getNextHistoryInputRef = useRef(getNextHistoryInput)
+    getNextHistoryInputRef.current = getNextHistoryInput
+    const insertFilesRef = useRef<(files: File[]) => void>(() => {})
+    const insertLinksRef = useRef<(urls: string[]) => void>(() => {})
 
     const closeSelectModelErrorTipCb = useRef<NodeJS.Timeout>()
-    const handleSubmit = async (needGenerating = true) => {
-      if (disableSubmit || generating || isSubmitting || isPreprocessing) {
-        return
-      }
-
-      // 有解析失败的文件或链接时，阻止发送并显示 toast
-      if (hasPreprocessErrors) {
-        toastActions.add(t('Some files failed to parse. Please remove them and try again.'))
+    const handleSubmit = async (needGenerating = true, options: SubmitOptions = {}) => {
+      if (
+        disableSubmit ||
+        generating ||
+        isSubmitting ||
+        isPreprocessing ||
+        hasPreprocessErrors ||
+        hasBlockedSessionRagFiles
+      ) {
         return
       }
 
@@ -480,24 +703,62 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
         return
       }
 
+      // Cancel any pending debounce so it won't overwrite the reset after send
+      clearTimeout(debouncedUpdateTimerRef.current)
+
       setIsSubmitting(true)
       try {
-        // Use the already constructed message
-        if (!preConstructedMessage.message) {
+        let preprocessedFilesForSubmit = preConstructedMessage.preprocessedFiles
+        const submitSessionAttachmentIds = Array.from(
+          new Set(
+            preprocessedFilesForSubmit.flatMap((file) => (file.sessionAttachmentId ? [file.sessionAttachmentId] : []))
+          )
+        )
+        if (platform.type === 'desktop' && submitSessionAttachmentIds.length > 0) {
+          const latestAttachmentStates = await platform
+            .getSessionAttachmentRagController()
+            .getAttachments(submitSessionAttachmentIds)
+          const result = mergeSessionAttachmentStatesIntoFiles(preprocessedFilesForSubmit, latestAttachmentStates)
+          preprocessedFilesForSubmit = result.files
+          if (result.changed) {
+            setPreConstructedMessage((prev) => ({ ...prev, preprocessedFiles: result.files }))
+          }
+        }
+        const unreadySessionAttachments = preprocessedFilesForSubmit.filter(
+          (file) =>
+            file.ragMode === 'session-retrieval' &&
+            file.sessionAttachmentAvailability !== 'blocked' &&
+            (file.sessionAttachmentIndexStatus ?? 'pending') !== 'ready'
+        )
+        if (unreadySessionAttachments.length > 0 && !options.allowUnreadySessionAttachments) {
+          setUnreadyAttachmentSubmitPrompt({ opened: true, count: unreadySessionAttachments.length })
+          return
+        }
+
+        // Build the message with the latest input text, bypassing debounce delay
+        const latestMessage = sessionHelpers.constructUserMessage(
+          preConstructedMessage.draftMessageId,
+          latestInputRef.current,
+          pictureKeys,
+          preprocessedFilesForSubmit,
+          preConstructedMessage.preprocessedLinks
+        )
+        if (!latestMessage) {
           console.error('No constructed message available')
           return
         }
 
-        const messageTextForHistory =
-          preConstructedMessage.message.contentParts.find((p) => p.type === 'text')?.text || ''
+        const messageTextForHistory = latestMessage.contentParts.find((p) => p.type === 'text')?.text || ''
 
         const params = {
-          constructedMessage: preConstructedMessage.message,
+          constructedMessage: latestMessage,
           needGenerating,
           onUserMessageReady: () => {
-            clearDraft()
+            messageInputFieldRef.current?.clearDraft()
             setLinks([])
+            draftMessageIdRef.current = undefined
             setPreConstructedMessage({
+              draftMessageId: undefined,
               text: '',
               pictureKeys: [],
               attachments: [],
@@ -531,75 +792,72 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
         setIsSubmitting(false)
       }
     }
+    handleSubmitRef.current = handleSubmit
 
-    const onMessageInput = useCallback(
-      (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-        const input = event.target.value
-        setMessageInput(input)
-        resetHistoryIndex()
-      },
-      [setMessageInput, resetHistoryIndex]
-    )
+    const onKeyDown = useCallback(
+      (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        const isPressedHash: Record<ShortcutSendValue, boolean> = {
+          '': false,
+          Enter: event.keyCode === 13 && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey,
+          'CommandOrControl+Enter': event.keyCode === 13 && (event.ctrlKey || event.metaKey) && !event.shiftKey,
+          'Ctrl+Enter': event.keyCode === 13 && event.ctrlKey && !event.shiftKey,
+          'Command+Enter': event.keyCode === 13 && event.metaKey,
+          'Shift+Enter': event.keyCode === 13 && event.shiftKey,
+          'Ctrl+Shift+Enter': event.keyCode === 13 && event.ctrlKey && event.shiftKey,
+        }
 
-    const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      const isPressedHash: Record<ShortcutSendValue, boolean> = {
-        '': false,
-        Enter: event.keyCode === 13 && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey,
-        'CommandOrControl+Enter': event.keyCode === 13 && (event.ctrlKey || event.metaKey) && !event.shiftKey,
-        'Ctrl+Enter': event.keyCode === 13 && event.ctrlKey && !event.shiftKey,
-        'Command+Enter': event.keyCode === 13 && event.metaKey,
-        'Shift+Enter': event.keyCode === 13 && event.shiftKey,
-        'Ctrl+Shift+Enter': event.keyCode === 13 && event.ctrlKey && event.shiftKey,
-      }
-
-      // 发送消息
-      if (isPressedHash[shortcuts.inputBoxSendMessage]) {
-        if (platform.type === 'mobile' && isSmallScreen && shortcuts.inputBoxSendMessage === 'Enter') {
-          // 移动端点击回车不会发送消息
+        // 发送消息
+        if (isPressedHash[shortcuts.inputBoxSendMessage]) {
+          if (platform.type === 'mobile' && isSmallScreen && shortcuts.inputBoxSendMessage === 'Enter') {
+            // 移动端点击回车不会发送消息
+            return
+          }
+          event.preventDefault()
+          handleSubmitRef.current()
           return
         }
-        event.preventDefault()
-        handleSubmit()
-        return
-      }
 
-      // 发送消息但不生成回复
-      if (isPressedHash[shortcuts.inputBoxSendMessageWithoutResponse]) {
-        event.preventDefault()
-        handleSubmit(false)
-        return
-      }
+        // 发送消息但不生成回复
+        if (isPressedHash[shortcuts.inputBoxSendMessageWithoutResponse]) {
+          event.preventDefault()
+          handleSubmitRef.current(false)
+          return
+        }
 
-      // 向上向下键翻阅历史消息
-      if (
-        (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
-        inputRef.current &&
-        inputRef.current === document.activeElement && // 聚焦在输入框
-        (messageInput.length === 0 || window.getSelection()?.toString() === messageInput) // 要么为空，要么输入框全选
-      ) {
-        event.preventDefault()
-        if (event.key === 'ArrowUp') {
-          const previousInput = getPreviousHistoryInput()
-          if (previousInput !== undefined) {
-            setMessageInput(previousInput)
-            setTimeout(() => inputRef.current?.select(), 10)
-          }
-        } else if (event.key === 'ArrowDown') {
-          const nextInput = getNextHistoryInput()
-          if (nextInput !== undefined) {
-            setMessageInput(nextInput)
-            setTimeout(() => inputRef.current?.select(), 10)
+        // 向上向下键翻阅历史消息
+        const currentInput = latestInputRef.current
+        const inputElement = messageInputFieldRef.current?.getElement()
+        if (
+          (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+          inputElement &&
+          inputElement === document.activeElement && // 聚焦在输入框
+          (currentInput.length === 0 || window.getSelection()?.toString() === currentInput) // 要么为空，要么输入框全选
+        ) {
+          event.preventDefault()
+          if (event.key === 'ArrowUp') {
+            const previousInput = getPreviousHistoryInputRef.current()
+            if (previousInput !== undefined) {
+              messageInputFieldRef.current?.setValue(previousInput)
+              setTimeout(() => inputElement?.select(), 10)
+            }
+          } else if (event.key === 'ArrowDown') {
+            const nextInput = getNextHistoryInputRef.current()
+            if (nextInput !== undefined) {
+              messageInputFieldRef.current?.setValue(nextInput)
+              setTimeout(() => inputElement?.select(), 10)
+            }
           }
         }
-      }
 
-      // Prevent Chromium's native Escape behaviour which reverts textarea
-      // value to its defaultValue, causing controlled-input state to desync.
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        inputRef.current?.blur()
-      }
-    }
+        // Prevent Chromium's native Escape behaviour which reverts textarea
+        // value to its defaultValue, causing controlled-input state to desync.
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          messageInputFieldRef.current?.getElement()?.blur()
+        }
+      },
+      [shortcuts, isSmallScreen]
+    )
 
     const startNewThread = () => {
       const res = onStartNewThread?.()
@@ -648,58 +906,126 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
     }
 
     const startFilePreprocessing = (file: File) => {
+      const fileKey = StorageKeyGenerator.fileUniqKey(file)
+      inputFileKeyByFileRef.current.set(file, fileKey)
+      activeFilePreprocessingKeysRef.current.add(fileKey)
+
       // 异步预处理文件，失败时标记为 error，并吞掉异常避免 Promise.all reject
       return sessionHelpers
-        .preprocessFile(file, { provider: model?.provider || '', modelId: model?.modelId || '' })
-        .then((preprocessedFile) => {
-          setPreConstructedMessage((prev) => onFileProcessed(prev, file, preprocessedFile, 20))
+        .prepareFileAttachment(file, { provider: model?.provider || '', modelId: model?.modelId || '' })
+        .then(async (preprocessedFile) => {
+          if (!activeFilePreprocessingKeysRef.current.has(fileKey)) {
+            return
+          }
+
+          let nextPreprocessedFile: PreprocessedFile = { ...preprocessedFile, inputFileKey: fileKey }
+          if (platform.type === 'desktop') {
+            const draftMessageId = draftMessageIdRef.current || uuidv4()
+            const indexedFile = await startPreparedSessionAttachmentIndexing({
+              file,
+              preparedFile: nextPreprocessedFile,
+              sessionId: currentSessionId || 'new',
+              draftMessageId,
+              shouldContinue: () => activeFilePreprocessingKeysRef.current.has(fileKey),
+            })
+            if (!indexedFile) {
+              return
+            }
+            nextPreprocessedFile = indexedFile
+            if (indexedFile.draftMessageId) {
+              draftMessageIdRef.current = indexedFile.draftMessageId
+            }
+          }
+
+          setPreConstructedMessage((prev) =>
+            onFileProcessed(prev, file, nextPreprocessedFile, 20, { fileKeys: [fileKey] })
+          )
         })
         .catch((error) => {
+          if (!activeFilePreprocessingKeysRef.current.has(fileKey)) {
+            return
+          }
           setPreConstructedMessage((prev) =>
             onFileProcessed(
               prev,
               file,
               {
                 file,
+                inputFileKey: fileKey,
                 content: '',
                 storageKey: '',
                 error: (error as Error)?.message || 'Failed to preprocess the file.',
               },
-              20
+              20,
+              { fileKeys: [fileKey] }
             )
           )
+        })
+        .finally(() => {
+          activeFilePreprocessingKeysRef.current.delete(fileKey)
         })
     }
 
     const insertLinks = (urls: string[]) => {
-      let newLinks = [...(links || []), ...urls.map((u) => ({ url: u }))]
-      newLinks = _.uniqBy(newLinks, 'url')
-      newLinks = newLinks.slice(-6) // 最多插入 6 个链接
+      const MAX_LINKS = 6
+      const dedupedLinks = _.uniqBy([...(links || []), ...urls.map((u) => ({ url: u }))], 'url')
+      // 保留最先添加的前 6 个链接，多出来的直接丢弃（而非静默丢掉最早的）
+      const newLinks = dedupedLinks.slice(0, MAX_LINKS)
       setLinks(newLinks)
 
-      // 预处理链接（只处理前6个）
-      for (let i = 0; i < Math.min(urls.length, 6); i++) {
-        const url = urls[i]
-        const linkIndex = newLinks.findIndex((l) => l.url === url)
+      if (dedupedLinks.length > newLinks.length) {
+        toastActions.add(
+          t('Only the first {{limit}} links can be attached. The extra links were skipped.', { limit: MAX_LINKS })
+        )
+      }
 
-        if (linkIndex < 6) {
+      // 只预处理实际保留下来的链接（findIndex 返回 -1 表示该链接已被裁剪，跳过）
+      for (const url of urls) {
+        const linkIndex = newLinks.findIndex((l) => l.url === url)
+        if (linkIndex >= 0 && linkIndex < MAX_LINKS) {
           startLinkPreprocessing(url)
         }
       }
     }
 
     const insertFiles = async (files: File[]) => {
+      const MAX_IMAGES = 8
+      const MAX_ATTACHMENTS = 20
+      // 用本地累加器跟踪本次新增数量：同步循环内 state/ref 可能尚未刷新，靠它做无竞态的限额判断
+      let imageCount = preConstructedMessageRef.current.pictureKeys?.length || 0
+      let attachmentCount = preConstructedMessageRef.current.attachments?.length || 0
+      let droppedImages = 0
+      let droppedAttachments = 0
+
       for (const file of files) {
         // 文件和图片插入方法复用，会导致 svg、gif 这类不支持的图片也被插入，但暂时没看到有什么问题
         if (file.type.startsWith('image/')) {
+          // 超过上限时直接跳过：保留最先添加的前 8 张，且不浪费转码/不产生孤儿 blob
+          if (imageCount >= MAX_IMAGES) {
+            droppedImages++
+            continue
+          }
           const base64 = await picUtils.getImageBase64AndResize(file)
           const key = StorageKeyGenerator.picture('input-box')
           await saveBlob.mutateAsync({ key, value: base64 })
           setPreConstructedMessage((prev) => ({
             ...prev,
-            pictureKeys: [...(prev.pictureKeys || []), key].slice(-8),
-          })) // Maximum 8 images
+            pictureKeys: [...(prev.pictureKeys || []), key].slice(0, MAX_IMAGES), // 保留最先添加的前 8 张
+          }))
+          imageCount++
         } else {
+          if (file.size > KNOWLEDGE_BASE_MAX_FILE_SIZE) {
+            toastActions.add(
+              t(
+                'Chat attachments must be {{limit}} or smaller. Please upload larger documents through Knowledge Base.',
+                {
+                  limit: KNOWLEDGE_BASE_MAX_FILE_SIZE_LABEL,
+                }
+              )
+            )
+            continue
+          }
+
           // Check if file type is supported
           if (!isSupportedFile(file.name)) {
             const unsupportedType = getUnsupportedFileType(file.name)
@@ -720,33 +1046,62 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
             toastActions.add(errorMsg)
             continue
           }
+
+          // 已存在的文件视为重复（不占新增名额），新文件超过上限时直接跳过：保留最先添加的前 20 个
+          const isDuplicate = (preConstructedMessageRef.current.attachments || []).some(
+            (f) => StorageKeyGenerator.fileUniqKey(f) === StorageKeyGenerator.fileUniqKey(file)
+          )
+          if (!isDuplicate && attachmentCount >= MAX_ATTACHMENTS) {
+            droppedAttachments++
+            continue
+          }
+
           setPreConstructedMessage((prev) => {
+            const draftMessageId = prev.draftMessageId || draftMessageIdRef.current || uuidv4()
+            draftMessageIdRef.current = draftMessageId
             const newAttachments = prev.attachments.find(
               (f) => StorageKeyGenerator.fileUniqKey(f) === StorageKeyGenerator.fileUniqKey(file)
             )
               ? prev.attachments
-              : [...(prev.attachments || []), file].slice(-20) // Maximum 20 attachments
+              : [...(prev.attachments || []), file].slice(0, MAX_ATTACHMENTS) // 保留最先添加的前 20 个
 
-            // Only preprocess first 20 files to avoid wasting resources
+            // 只预处理实际保留下来的文件（findIndex 返回 -1 表示已被裁剪，跳过，避免残留状态阻塞发送）
             const fileIndex = newAttachments.findIndex(
               (f) => f.name === file.name && f.lastModified === file.lastModified
             )
-            if (fileIndex < 20) {
+            if (fileIndex >= 0 && fileIndex < MAX_ATTACHMENTS) {
               const preprocessPromise = startFilePreprocessing(file)
               return {
-                ...storeFilePromise(markFileProcessing(prev, file), file, preprocessPromise),
+                ...storeFilePromise(markFileProcessing({ ...prev, draftMessageId }, file), file, preprocessPromise),
                 attachments: newAttachments,
               }
             }
 
             return {
               ...prev,
+              draftMessageId,
               attachments: newAttachments,
             }
           })
+          if (!isDuplicate) {
+            attachmentCount++
+          }
         }
       }
+
+      if (droppedImages > 0) {
+        toastActions.add(
+          t('You can attach up to {{limit}} images. The extra images were skipped.', { limit: MAX_IMAGES })
+        )
+      }
+      if (droppedAttachments > 0) {
+        toastActions.add(
+          t('You can attach up to {{limit}} files. The extra files were skipped.', { limit: MAX_ATTACHMENTS })
+        )
+      }
     }
+    insertFilesRef.current = insertFiles
+    insertLinksRef.current = insertLinks
 
     const onFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       if (!event.target.files) {
@@ -773,54 +1128,59 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
       // await storage.delBlob(picKey)
     }
 
-    const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      if (sessionType === 'picture') {
-        return
-      }
-      if (event.clipboardData?.items) {
-        // 对于 Doc/PPT/XLS 等文件中的内容，粘贴时一般会有 4 个 items，分别是 text 文本、html、某格式和图片
-        // 因为 getAsString 为异步操作，无法根据 items 中的内容来定制不同的粘贴行为，因此这里选择了最简单的做法：
-        // 保持默认的粘贴行为，这时候会粘贴从文档中复制的文本和图片。我认为应该保留图片，因为文档中的表格、图表等图片信息也很重要，很难通过文本格式来表述。
-        // 仅在只粘贴图片或文件时阻止默认行为，防止插入文件或图片的名字
-        let hasText = false
-        for (let i = 0; i < event.clipboardData.items.length; i++) {
-          const item = event.clipboardData.items[i]
-          if (item.kind === 'file') {
-            // Insert files and images
-            const file = item.getAsFile()
-            if (file) {
-              insertFiles([file])
+    const onPaste = useCallback(
+      (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        if (sessionType === 'picture') {
+          return
+        }
+        if (event.clipboardData?.items) {
+          // 对于 Doc/PPT/XLS 等文件中的内容，粘贴时一般会有 4 个 items，分别是 text 文本、html、某格式和图片
+          // 因为 getAsString 为异步操作，无法根据 items 中的内容来定制不同的粘贴行为，因此这里选择了最简单的做法：
+          // 保持默认的粘贴行为，这时候会粘贴从文档中复制的文本和图片。我认为应该保留图片，因为文档中的表格、图表等图片信息也很重要，很难通过文本格式来表述。
+          // 仅在只粘贴图片或文件时阻止默认行为，防止插入文件或图片的名字
+          let hasText = false
+          // Capture pre-paste text before async getAsString callback runs (browser will have inserted pasted text by then)
+          const prePasteText = latestInputRef.current
+          for (let i = 0; i < event.clipboardData.items.length; i++) {
+            const item = event.clipboardData.items[i]
+            if (item.kind === 'file') {
+              // Insert files and images
+              const file = item.getAsFile()
+              if (file) {
+                insertFilesRef.current([file])
+              }
+              continue
             }
-            continue
+            hasText = true
+            if (item.kind === 'string' && item.type === 'text/plain') {
+              // 插入链接：如果复制的是链接，则插入链接
+              item.getAsString((text) => {
+                const raw = text.trim()
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                  const urls = raw
+                    .split(/\s+/)
+                    .map((url) => url.trim())
+                    .filter((url) => url.startsWith('http://') || url.startsWith('https://'))
+                  insertLinksRef.current(urls)
+                }
+                if (pasteLongTextAsAFile && raw.length > 3000) {
+                  const file = new File([text], `pasted_text_${Date.now()}.txt`, {
+                    type: 'text/plain',
+                  })
+                  insertFilesRef.current([file])
+                  messageInputFieldRef.current?.setValue(prePasteText) // 删除掉默认粘贴进去的长文本
+                }
+              })
+            }
           }
-          hasText = true
-          if (item.kind === 'string' && item.type === 'text/plain') {
-            // 插入链接：如果复制的是链接，则插入链接
-            item.getAsString((text) => {
-              const raw = text.trim()
-              if (raw.startsWith('http://') || raw.startsWith('https://')) {
-                const urls = raw
-                  .split(/\s+/)
-                  .map((url) => url.trim())
-                  .filter((url) => url.startsWith('http://') || url.startsWith('https://'))
-                insertLinks(urls)
-              }
-              if (pasteLongTextAsAFile && raw.length > 3000) {
-                const file = new File([text], `pasted_text_${attachments?.length || 0}.txt`, {
-                  type: 'text/plain',
-                })
-                insertFiles([file])
-                setMessageInput(messageInput) // 删除掉默认粘贴进去的长文本
-              }
-            })
+          // 如果没有任何文本，则说明只是复制了图片或文件。这里阻止默认行为，防止插入文件或图片的名字
+          if (!hasText) {
+            event.preventDefault()
           }
         }
-        // 如果没有任何文本，则说明只是复制了图片或文件。这里阻止默认行为，防止插入文件或图片的名字
-        if (!hasText) {
-          event.preventDefault()
-        }
-      }
-    }
+      },
+      [sessionType, pasteLongTextAsAFile]
+    )
 
     const handleAttachLink = async () => {
       const links: string[] = await NiceModal.show('attach-link')
@@ -854,7 +1214,7 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
         // TODO: 支持引用消息中的图片
         // TODO: 支持引用消息中的文件
         setQuote('')
-        setMessageInput((val) => {
+        messageInputFieldRef.current?.setValue((val) => {
           const newValue = !val
             ? quote
             : val + '\n'.repeat(Math.max(0, 2 - (val.match(/(\n)+$/)?.[0].length || 0))) + quote
@@ -915,35 +1275,31 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
           >
             {/* Input Row */}
             <Flex align="flex-end" gap={4}>
-              <Textarea
-                unstyled={true}
-                styles={{ input: { fontSize: 14 } }}
-                classNames={{
-                  root: 'flex-1',
-                  wrapper: 'flex-1',
-                  input:
-                    'block w-full outline-none border-none px-2 py-1 resize-none bg-transparent text-chatbox-tint-primary leading-6',
-                }}
-                size="sm"
-                id={dom.messageInputID}
-                ref={inputRef}
+              <MessageInputField
+                ref={messageInputFieldRef}
+                isNewSession={isNewSession}
+                isSmallScreen={isSmallScreen}
+                viewportHeight={viewportHeight}
+                isReadOnly={isCompactionRunning}
                 placeholder={t('Type your question here...') || ''}
-                bg="transparent"
-                autosize={true}
-                minRows={2}
-                maxRows={Math.max(4, Math.floor(viewportHeight / 100))}
-                value={messageInput}
                 autoFocus={!isSmallScreen}
-                readOnly={isCompactionRunning}
-                onChange={onMessageInput}
+                onValueChange={onMessageInputValueChange}
+                onUserInput={onUserInput}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
-                data-testid="message-input"
               />
 
               {/* Send Button */}
               <ActionIcon
-                disabled={(disableSubmit || isPreprocessing || isSubmitting || isCompactionRunning) && !generating}
+                disabled={
+                  (disableSubmit ||
+                    isPreprocessing ||
+                    isSubmitting ||
+                    isCompactionRunning ||
+                    hasPreprocessErrors ||
+                    hasBlockedSessionRagFiles) &&
+                  !generating
+                }
                 size={32}
                 variant="filled"
                 color={generating ? 'dark' : 'chatbox-brand'}
@@ -952,11 +1308,22 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
                 className={cn(
                   'shrink-0 mb-1',
                   !generating &&
-                    (disableSubmit || isPreprocessing || isSubmitting || isCompactionRunning) &&
+                    (disableSubmit ||
+                      isPreprocessing ||
+                      isSubmitting ||
+                      isCompactionRunning ||
+                      hasPreprocessErrors ||
+                      hasBlockedSessionRagFiles) &&
                     'disabled:!opacity-100 !text-white'
                 )}
                 style={
-                  !generating && (disableSubmit || isPreprocessing || isSubmitting || isCompactionRunning)
+                  !generating &&
+                  (disableSubmit ||
+                    isPreprocessing ||
+                    isSubmitting ||
+                    isCompactionRunning ||
+                    hasPreprocessErrors ||
+                    hasBlockedSessionRagFiles)
                     ? { backgroundColor: 'rgba(222, 226, 230, 1)' }
                     : undefined
                 }
@@ -970,44 +1337,176 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
             </Flex>
 
             {(!!pictureKeys.length || !!attachments.length || !!links.length) && (
-              <Flex align="center" wrap="wrap" onClick={() => dom.focusMessageInput()}>
+              <Flex
+                align="center"
+                wrap="wrap"
+                className="max-h-[30vh] overflow-y-auto"
+                onClick={() => dom.focusMessageInput()}
+              >
+                {showSessionRetrievalToolWarning && (
+                  <Flex
+                    role="status"
+                    aria-live="polite"
+                    align="center"
+                    gap={8}
+                    className="w-full rounded-md px-2.5 py-2 mb-1"
+                    style={{
+                      border: '1px solid var(--chatbox-border-primary)',
+                      borderLeft: '3px solid var(--chatbox-tint-warning)',
+                      background: 'var(--chatbox-background-primary)',
+                    }}
+                  >
+                    <Box
+                      className="flex items-center justify-center rounded-full shrink-0"
+                      style={{
+                        width: 20,
+                        height: 20,
+                        background: 'var(--chatbox-background-secondary)',
+                        color: 'var(--chatbox-tint-warning)',
+                      }}
+                    >
+                      <ScalableIcon icon={IconAlertCircle} size={14} />
+                    </Box>
+                    <Text size="xs" lh={1.35} c="chatbox-warning" className="min-w-0">
+                      {t(
+                        'This model may not be able to read the uploaded document. Try another model if you want to ask about the file.'
+                      )}
+                    </Text>
+                  </Flex>
+                )}
+                {hasLargeAttachmentWarning && (
+                  <Flex
+                    role="status"
+                    aria-live="polite"
+                    align="center"
+                    gap={8}
+                    className="w-full rounded-md px-2.5 py-2 mb-1"
+                    style={{
+                      border: '1px solid var(--chatbox-border-primary)',
+                      borderLeft: '3px solid var(--chatbox-tint-warning)',
+                      background: 'var(--chatbox-background-primary)',
+                    }}
+                  >
+                    <Box
+                      className="flex items-center justify-center rounded-full shrink-0"
+                      style={{
+                        width: 20,
+                        height: 20,
+                        background: 'var(--chatbox-background-secondary)',
+                        color: 'var(--chatbox-tint-warning)',
+                      }}
+                    >
+                      <ScalableIcon icon={IconAlertCircle} size={14} />
+                    </Box>
+                    <Text size="xs" lh={1.35} c="chatbox-warning" className="min-w-0">
+                      {t(
+                        'This attachment is very large and may consume more points. You can send it anyway, or remove it and use a smaller file.'
+                      )}
+                    </Text>
+                  </Flex>
+                )}
                 {pictureKeys?.map((picKey) => (
                   <ImageMiniCard key={picKey} storageKey={picKey} onDelete={() => onImageDeleteClick(picKey)} />
                 ))}
                 {attachments?.map((file) => {
-                  const fileKey = StorageKeyGenerator.fileUniqKey(file)
+                  const fileKey = inputFileKeyByFileRef.current.get(file) ?? StorageKeyGenerator.fileUniqKey(file)
                   const status = preConstructedMessage.preprocessingStatus.files[fileKey]
                   const preprocessedFile = preConstructedMessage.preprocessedFiles.find(
-                    (f) => StorageKeyGenerator.fileUniqKey(f.file) === fileKey
+                    (f) => f.inputFileKey === fileKey || StorageKeyGenerator.fileUniqKey(f.file) === fileKey
                   )
+                  const effectiveIndexStatus = preprocessedFile?.sessionAttachmentId
+                    ? (preprocessedAttachmentIndexStatusMap.get(preprocessedFile.sessionAttachmentId) ??
+                      preprocessedFile.sessionAttachmentIndexStatus)
+                    : preprocessedFile?.sessionAttachmentIndexStatus
+                  const effectiveAttachmentError = preprocessedFile?.sessionAttachmentId
+                    ? (preprocessedAttachmentErrorMap.get(preprocessedFile.sessionAttachmentId) ??
+                      preprocessedFile?.error)
+                    : preprocessedFile?.error
+                  const attachmentProgress = preprocessedFile?.sessionAttachmentId
+                    ? preprocessedAttachmentProgressMap.get(preprocessedFile.sessionAttachmentId)
+                    : undefined
+                  const totalChunks =
+                    attachmentProgress?.totalChunks ?? preprocessedFile?.sessionAttachmentTotalChunks ?? 0
+                  const embeddedChunks =
+                    attachmentProgress?.embeddedChunks ?? preprocessedFile?.sessionAttachmentEmbeddedChunks ?? 0
+                  const indexingStage =
+                    attachmentProgress?.indexingStage ?? preprocessedFile?.sessionAttachmentIndexingStage
+                  const progressValue = getSessionAttachmentProgressValue(embeddedChunks, totalChunks)
+                  const isSessionAttachmentTakingLong =
+                    !!attachmentProgress?.processingStartedAt &&
+                    effectiveIndexStatus !== 'ready' &&
+                    Date.now() - attachmentProgress.processingStartedAt > 30000
+                  const statusText =
+                    preprocessedFile?.ragMode === 'session-retrieval' && effectiveIndexStatus !== 'ready'
+                      ? progressValue !== undefined
+                        ? `${isSessionAttachmentTakingLong ? t('Still indexing') : getSessionAttachmentStageLabel(indexingStage, t)} · ${progressValue}%`
+                        : isSessionAttachmentTakingLong
+                          ? t('Still indexing')
+                          : getSessionAttachmentStageLabel(indexingStage, t)
+                      : status === 'processing'
+                        ? t('Preparing')
+                        : undefined
                   return (
                     <FileMiniCard
                       key={fileKey}
                       name={file.name}
                       fileType={file.type}
-                      status={status}
-                      errorMessage={preprocessedFile?.error}
+                      status={
+                        effectiveAttachmentError
+                          ? 'error'
+                          : preprocessedFile?.ragMode === 'session-retrieval'
+                            ? effectiveIndexStatus === 'ready'
+                              ? 'completed'
+                              : 'processing'
+                            : status
+                      }
+                      statusText={statusText}
+                      progressValue={progressValue}
+                      isTakingLong={isSessionAttachmentTakingLong}
+                      errorMessage={effectiveAttachmentError}
                       onErrorClick={() => {
-                        if (preprocessedFile?.error) {
+                        const errorCode = effectiveAttachmentError
+                        if (errorCode) {
                           void NiceModal.show('file-parse-error', {
-                            errorCode: preprocessedFile.error,
+                            errorCode,
                             fileName: file.name,
                           })
                         }
                       }}
+                      onPreviewClick={
+                        preprocessedFile?.storageKey
+                          ? () => {
+                              void NiceModal.show('content-viewer', {
+                                title: `${t('File Content')}: ${file.name}`,
+                                storageKey: preprocessedFile.storageKey,
+                              })
+                            }
+                          : undefined
+                      }
                       onDelete={() => {
+                        const fileKeysToRemove = new Set([fileKey])
                         // Cancel any ongoing MinerU parsing for this file
-                        if (file.path && platform.cancelMineruParse) {
-                          platform.cancelMineruParse(file.path).catch(() => {
+                        const filePath = platform.getLocalFilePath(file)
+                        fileKeysToRemove.add(StorageKeyGenerator.fileUniqKey(file))
+                        for (const key of fileKeysToRemove) {
+                          activeFilePreprocessingKeysRef.current.delete(key)
+                        }
+                        if (filePath && platform.cancelMineruParse) {
+                          platform.cancelMineruParse(filePath).catch(() => {
                             // Ignore cancellation errors
                           })
                         }
-                        setPreConstructedMessage((prev) => ({
-                          ...cleanupFile(prev, file),
-                          attachments: (prev.attachments || []).filter(
-                            (f) => StorageKeyGenerator.fileUniqKey(f) !== fileKey
-                          ),
-                        }))
+                        if (platform.type === 'desktop' && preprocessedFile?.sessionAttachmentId) {
+                          void platform
+                            .getSessionAttachmentRagController()
+                            .deleteAttachment(preprocessedFile.sessionAttachmentId)
+                            .catch(() => {
+                              // Ignore cancellation errors
+                            })
+                        }
+                        setPreConstructedMessage((prev) =>
+                          cleanupFile(prev, file, { fileKeys: fileKeysToRemove, removeAttachment: true })
+                        )
                       }}
                     />
                   )
@@ -1298,6 +1797,38 @@ const InputBox = forwardRef<InputBoxRef, InputBoxProps>(
             session={currentSession}
           />
         )}
+        <AdaptiveModal
+          opened={unreadyAttachmentSubmitPrompt.opened}
+          onClose={() => setUnreadyAttachmentSubmitPrompt((prev) => ({ ...prev, opened: false }))}
+          title={t('Document is still indexing')}
+          centered
+          size="sm"
+        >
+          <Stack gap="sm">
+            <Text size="sm" c="dimmed">
+              {t(
+                '{{count}} document(s) are still being prepared. If you send now, the answer may not use the full document.',
+                { count: unreadyAttachmentSubmitPrompt.count }
+              )}
+            </Text>
+            <AdaptiveModal.Actions>
+              <Button
+                variant="default"
+                onClick={() => setUnreadyAttachmentSubmitPrompt((prev) => ({ ...prev, opened: false }))}
+              >
+                {t('Wait')}
+              </Button>
+              <Button
+                onClick={() => {
+                  setUnreadyAttachmentSubmitPrompt((prev) => ({ ...prev, opened: false }))
+                  void handleSubmit(true, { allowUnreadySessionAttachments: true })
+                }}
+              >
+                {t('Send anyway')}
+              </Button>
+            </AdaptiveModal.Actions>
+          </Stack>
+        </AdaptiveModal>
       </Box>
     )
   }
@@ -1347,3 +1878,105 @@ const AttachmentMenu: React.FC<{
 
 // Memoize the InputBox component to prevent unnecessary re-renders during streaming
 export default memo(InputBox)
+
+// ============================================================================
+// MessageInputField — isolated textarea to prevent parent re-renders on typing
+// ============================================================================
+
+export type MessageInputFieldRef = {
+  getValue: () => string
+  setValue: (val: string | ((prev: string) => string)) => void
+  clearDraft: () => void
+  getElement: () => HTMLTextAreaElement | null
+}
+
+type MessageInputFieldProps = {
+  isNewSession: boolean
+  isSmallScreen: boolean
+  viewportHeight: number
+  isReadOnly: boolean
+  placeholder: string
+  autoFocus: boolean
+  /** Called on every value change (including programmatic setValue). */
+  onValueChange: (value: string) => void
+  /** Called only on real user typing (onChange), not programmatic setValue. */
+  onUserInput?: () => void
+  onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void
+  onPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void
+}
+
+const MessageInputField = memo(
+  forwardRef<MessageInputFieldRef, MessageInputFieldProps>(
+    (
+      {
+        isNewSession,
+        isSmallScreen,
+        viewportHeight,
+        isReadOnly,
+        placeholder,
+        autoFocus,
+        onValueChange,
+        onUserInput,
+        onKeyDown,
+        onPaste,
+      },
+      ref
+    ) => {
+      const { messageInput, setMessageInput, clearDraft } = useMessageInput('', { isNewSession })
+      const inputRef = useRef<HTMLTextAreaElement | null>(null)
+      const messageInputRef = useRef(messageInput)
+      messageInputRef.current = messageInput
+
+      useEffect(() => {
+        onValueChange(messageInput)
+      }, [messageInput, onValueChange])
+
+      useImperativeHandle(
+        ref,
+        () => ({
+          getValue: () => messageInputRef.current,
+          setValue: (val) => setMessageInput(val),
+          clearDraft: () => clearDraft(),
+          getElement: () => inputRef.current,
+        }),
+        [setMessageInput, clearDraft]
+      )
+
+      const onChange = useCallback(
+        (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+          setMessageInput(event.target.value)
+          onUserInput?.()
+        },
+        [setMessageInput, onUserInput]
+      )
+
+      return (
+        <Textarea
+          unstyled={true}
+          styles={{ input: { fontSize: 14 } }}
+          classNames={{
+            root: 'flex-1',
+            wrapper: 'flex-1',
+            input:
+              'block w-full outline-none border-none px-2 py-1 resize-none bg-transparent text-chatbox-tint-primary leading-6',
+          }}
+          size="sm"
+          id={dom.messageInputID}
+          ref={inputRef}
+          placeholder={placeholder || ''}
+          bg="transparent"
+          autosize={true}
+          minRows={2}
+          maxRows={Math.max(4, Math.floor(viewportHeight / 100))}
+          value={messageInput}
+          autoFocus={autoFocus}
+          readOnly={isReadOnly}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          onPaste={onPaste}
+          data-testid="message-input"
+        />
+      )
+    }
+  )
+)

@@ -1,7 +1,6 @@
 import NiceModal from '@ebay/nice-modal-react'
 import { ActionIcon, type ActionIconProps, Flex, Image as Img, Loader, Text, Tooltip as Tooltip1 } from '@mantine/core'
-import { Grid, useTheme } from '@mui/material'
-import Box from '@mui/material/Box'
+import { Box, Grid, useTheme } from '@mui/material'
 import type { Message, MessagePicture, MessageToolCallPart, SessionType } from '@shared/types'
 import { getMessageText } from '@shared/utils/message'
 import {
@@ -384,10 +383,11 @@ const _Message: FC<Props> = (props) => {
   const [actionMenuOpened, setActionMenuOpened] = useState(false)
 
   const isUserBubble = isBubbleLayout && msg.role === 'user'
+  const statusElements = <MessageStatuses statuses={msg.status} />
 
   const messageContent = (
     <>
-      <MessageStatuses statuses={msg.status} />
+      {!isBubbleLayout && statusElements}
       <div
         className={cn(
           isBubbleLayout ? 'inline-block max-w-full' : msg.role === 'assistant' ? 'w-full' : 'inline-block',
@@ -407,6 +407,7 @@ const _Message: FC<Props> = (props) => {
               : ''
         )}
       >
+        {isBubbleLayout && statusElements}
         <Box
           className={cn('msg-content', { 'msg-content-small': small })}
           sx={small ? { fontSize: theme.typography.body2.fontSize } : {}}
@@ -436,7 +437,7 @@ const _Message: FC<Props> = (props) => {
                         {item.text || ''}
                       </Markdown>
                     ) : (
-                      <div className="break-words whitespace-pre-line">
+                      <div className="break-words [overflow-wrap:anywhere] whitespace-pre-line">
                         {needCollapse && isCollapsed ? `${item.text.slice(0, collapseThreshold)}...` : item.text}
                         {needCollapse && isCollapsed && CollapseButton}
                       </div>

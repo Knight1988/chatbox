@@ -1,7 +1,9 @@
 export class BaseError extends Error {
   public code = 1
-  constructor(message: string) {
+  public requestId: string | undefined
+  constructor(message: string, options?: { requestId?: string }) {
     super(message)
+    this.requestId = options?.requestId
   }
 }
 
@@ -10,11 +12,11 @@ export class BaseError extends Error {
 export class ApiError extends BaseError {
   public code = 10001
   public responseBody: string | undefined
-  public httpStatusCode: number | undefined
-  constructor(message: string, responseBody?: string, httpStatusCode?: number) {
-    super('API Error: ' + message)
+  public statusCode: number | undefined
+  constructor(message: string, responseBody?: string, statusCode?: number, requestId?: string) {
+    super('API Error: ' + message, { requestId })
     this.responseBody = responseBody
-    this.httpStatusCode = httpStatusCode
+    this.statusCode = statusCode
   }
 }
 
@@ -56,7 +58,7 @@ export class OCRError extends BaseError {
 
 // Chatbox AI 服务错误
 // 注意，在开发时 i18nKey 中的标签和参数，都需要在 MessageErrTips 中定义
-// NOTE： 这个文件不会被 translate script 扫描到，为了能提取 key，把这里新增的 key 去 `src/renderer/i18n/for-key-scan.ts` 也添加一份
+// NOTE： 这个文件不会被 translate script 扫描到，`pnpm translate` 会先同步这里的 key 到 `src/renderer/i18n/for-key-scan.ts`
 export class ChatboxAIAPIError extends BaseError {
   static codeNameMap: { [codename: string]: ChatboxAIAPIErrorDetail } = {
     // 超出配额
@@ -66,12 +68,19 @@ export class ChatboxAIAPIError extends BaseError {
       i18nKey:
         'You have reached your monthly quota for the {{model}} model. Please <OpenSettingButton>go to Settings</OpenSettingButton> to switch to a different model, view your quota usage, or upgrade your plan.',
     },
+    // 超出配额（免费计划）
+    token_quota_exhausted_free: {
+      name: 'token_quota_exhausted_free',
+      code: 10004, // 免费计划的每日配额用同一个 code，前端根据 license 类型区分展示
+      i18nKey:
+        'You have reached your daily quota for the {{model}} model. Please <OpenSettingButton>go to Settings</OpenSettingButton> to switch to a different model, view your quota usage, or upgrade your plan.',
+    },
     // 当前套餐不支持该模型
     license_upgrade_required: {
       name: 'license_upgrade_required',
       code: 20001,
       i18nKey:
-        'Your current License (Chatbox AI Lite) does not support the {{model}} model. To use this model, please <OpenMorePlanButton>upgrade</OpenMorePlanButton> to Chatbox AI Pro or a higher-tier package. Alternatively, you can switch to a different model by <OpenSettingButton>accessing the settings</OpenSettingButton>.',
+        'Your current License (Chatbox AI Free/Lite) does not support the {{model}} model. To use this model, please <OpenMorePlanButton>upgrade</OpenMorePlanButton> to Chatbox AI Pro or a higher-tier package. Alternatively, you can switch to a different model by <OpenSettingButton>accessing the settings</OpenSettingButton>.',
     },
     // license 过期
     expired_license: {
@@ -105,12 +114,12 @@ export class ChatboxAIAPIError extends BaseError {
       i18nKey:
         'Invalid request parameters detected. Please try again later. Persistent failures may indicate an outdated software version. Consider upgrading to access the latest performance improvements and features.',
     },
-    // 文件类型不支持。支持的类型有 txt、md、html、doc、docx、pdf、excel、pptx、csv 以及所有文本类型的文件，包括代码文件
+    // 文件类型不支持。不同解析器支持的格式不同；旧版 Office 格式可能需要 Chatbox AI 云端解析。
     file_type_not_supported: {
       name: 'file_type_not_supported',
       code: 20007,
       i18nKey:
-        'File type not supported. Supported types include txt, md, html, doc, docx, pdf, excel, pptx, csv, and all text-based files, including code files.',
+        'File type not supported. Supported formats vary by parser. Try PDF, modern Office files, EPUB, CSV/TSV, HTML/Markdown, or non-binary text/code files. Legacy Office formats may require Chatbox AI cloud parsing.',
     },
     // 发送的文件已经超过七天，为了保护您的隐私，所有文件相关的缓存数据已经清理。您需要重新创建对话或刷新上下文，然后再次发送文件。
     file_expired: {
@@ -295,18 +304,24 @@ export class ChatboxAIAPIError extends BaseError {
         'The current search provider does not support reading webpages. Please <OpenExtensionSettingButton>choose a different search provider</OpenExtensionSettingButton> that supports this capability.',
     },
   }
-  static fromCodeName(response: string, codeName: string) {
+  static fromCodeName(response: string, codeName: string, requestId?: string) {
     if (!codeName) {
       return null
     }
     if (ChatboxAIAPIError.codeNameMap[codeName]) {
-      return new ChatboxAIAPIError(response, ChatboxAIAPIError.codeNameMap[codeName])
+      return new ChatboxAIAPIError(response, ChatboxAIAPIError.codeNameMap[codeName], requestId)
     }
     return null
   }
-  static getDetail(code: number) {
+  static getDetail(code: number, preferredCodeName?: string) {
     if (!code) {
       return null
+    }
+    if (preferredCodeName) {
+      const preferred = ChatboxAIAPIError.codeNameMap[preferredCodeName]
+      if (preferred && preferred.code === code) {
+        return preferred
+      }
     }
     for (const name in ChatboxAIAPIError.codeNameMap) {
       if (ChatboxAIAPIError.codeNameMap[name].code === code) {
@@ -317,8 +332,8 @@ export class ChatboxAIAPIError extends BaseError {
   }
 
   public detail: ChatboxAIAPIErrorDetail
-  constructor(message: string, detail: ChatboxAIAPIErrorDetail) {
-    super(message)
+  constructor(message: string, detail: ChatboxAIAPIErrorDetail, requestId?: string) {
+    super(message, { requestId })
     this.detail = detail
     this.code = detail.code
   }

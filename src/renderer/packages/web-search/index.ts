@@ -1,15 +1,16 @@
 import { cachified } from '@epic-web/cachified'
 import type { SearchResultItem } from '@shared/types'
 import { truncate } from 'lodash'
+import platform from '@/platform'
 import { getExtensionSettings, getLanguage, getLicenseKey } from '@/stores/settingActions'
 import { ChatboxAIAPIError } from '../../../shared/models/errors'
 import type WebSearch from './base'
 import { BingSearch } from './bing'
 import { BingNewsSearch } from './bing-news'
+import { BochaSearch } from './bocha'
 import { ChatboxSearch } from './chatbox-search'
 import { QueritSearch } from './querit'
 import { TavilySearch } from './tavily'
-import { BochaSearch } from './bocha'
 
 const MAX_CONTEXT_ITEMS = 10
 
@@ -34,23 +35,21 @@ function getSearchProviders() {
       break
     case 'bing':
       selectedProviders.push(new BingSearch())
-      if (language !== 'zh-Hans') {
-        selectedProviders.push(new BingNewsSearch()) // 国内无法使用
+      if (language !== 'zh-Hans' && platform.type !== 'mobile') {
+        selectedProviders.push(new BingNewsSearch()) // 国内和移动端容易被重定向到 Bing 首页
       }
       break
     case 'tavily':
       if (!settings.webSearch.tavilyApiKey) {
         throw ChatboxAIAPIError.fromCodeName('tavily_api_key_required', 'tavily_api_key_required')
       }
-      selectedProviders.push(
-        new TavilySearch(
-          settings.webSearch.tavilyApiKey,
-          settings.webSearch.tavilySearchDepth,
-          settings.webSearch.tavilyMaxResults,
-          settings.webSearch.tavilyTimeRange,
-          settings.webSearch.tavilyIncludeRawContent
-        )
-      )
+      selectedProviders.push(new TavilySearch(settings.webSearch.tavilyApiKey))
+      break
+    case 'bocha':
+      if (!settings.webSearch.bochaApiKey) {
+        throw ChatboxAIAPIError.fromCodeName('bocha_api_key_required', 'bocha_api_key_required')
+      }
+      selectedProviders.push(new BochaSearch(settings.webSearch.bochaApiKey))
       break
     case 'querit':
       if (!settings.webSearch.queritApiKey) {
@@ -63,12 +62,6 @@ function getSearchProviders() {
           settings.webSearch.queritTimeRange
         )
       )
-      break
-    case 'bocha':
-      if (!settings.webSearch.bochaApiKey) {
-        throw ChatboxAIAPIError.fromCodeName('bocha_api_key_required', 'bocha_api_key_required')
-      }
-      selectedProviders.push(new BochaSearch(settings.webSearch.bochaApiKey))
       break
     default:
       throw new Error(`Unsupported search provider: ${provider}`)
@@ -116,7 +109,6 @@ async function _searchRelatedResults(query: string, signal?: AbortSignal) {
     title: item.title,
     snippet: truncate(item.snippet, { length: 150 }),
     link: item.link,
-    rawContent: item.rawContent,
   }))
 }
 
