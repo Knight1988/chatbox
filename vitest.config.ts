@@ -24,6 +24,9 @@ export default defineConfig(({ mode }) => ({
       '@': path.resolve(__dirname, './src/renderer'),
       src: path.resolve(__dirname, './src'),
       '@shared': path.resolve(__dirname, 'src/shared'),
+      // Mock electron-log so main-process tests don't require the Electron binary
+      'electron-log/main': path.resolve(__dirname, 'src/__mocks__/electron-log.ts'),
+      'electron-log': path.resolve(__dirname, 'src/__mocks__/electron-log.ts'),
     },
   },
 }))
