@@ -55,11 +55,11 @@ jobs:
       - name: Run Biome lint check (non-blocking)
         run: pnpm check:biome || true
 
-      - name: Run TypeScript type check (non-blocking)
-        run: pnpm check || true
-
       - name: Build web version
         run: pnpm build:web
+
+      - name: Run TypeScript type check (non-blocking)
+        run: pnpm check || true
 
       - name: Run Vitest with coverage
         run: pnpm test:coverage
