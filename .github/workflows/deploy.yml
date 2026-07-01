@@ -2,7 +2,7 @@ name: Docker Deploy
 
 on:
   push:
-    branches: [main, beta]
+    branches: [main, master, beta]
 
 permissions:
   contents: read
@@ -82,7 +82,7 @@ jobs:
   deploy-dockge:
     needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.ref_name == 'main' || github.ref_name == 'beta'
+    if: github.ref_name == 'main' || github.ref_name == 'master' || github.ref_name == 'beta'
     steps:
       - name: Redeploy via Dockge
         env:
