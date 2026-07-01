@@ -4,7 +4,7 @@ import { aiProviderNameHash } from '@shared/models'
 import { ChatboxAIAPIError } from '@shared/models/errors'
 import type { Message } from '@shared/types'
 import { ModelProviderEnum } from '@shared/types/provider'
-import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconLanguage, IconReload } from '@tabler/icons-react'
+import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconLanguage, IconPlayerStopFilled, IconReload } from '@tabler/icons-react'
 import type React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
@@ -45,6 +45,7 @@ const httpStatusCodeI18nKeys: Record<number, string> = {
   502: 'HTTP error: Bad Gateway (502). The server received an invalid response from the upstream service. This is usually a temporary issue, please try again later.',
   503: 'HTTP error: Service Unavailable (503). The server is temporarily unavailable, possibly due to maintenance or overload. Please try again later.',
   504: 'HTTP error: Gateway Timeout (504). The server did not receive a timely response from the upstream service. This is usually a temporary issue, please try again later.',
+  524: 'HTTP error: A Timeout Occurred (524). The origin server did not respond in time. This is usually a temporary issue, please try again later.',
 }
 
 /**
@@ -142,8 +143,14 @@ function ErrorActionButtons(props: {
   )
 }
 
-export default function MessageErrTips(props: { msg: Message; onRetry?: () => void; isBubbleLayout?: boolean }) {
-  const { msg, onRetry, isBubbleLayout } = props
+export default function MessageErrTips(props: {
+  msg: Message
+  onRetry?: () => void
+  onStopRetry?: () => void
+  isAutoRetrying?: boolean
+  isBubbleLayout?: boolean
+}) {
+  const { msg, onRetry, onStopRetry, isAutoRetrying, isBubbleLayout } = props
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const licenseKey = useSettingsStore((state) => state.licenseKey)
@@ -352,18 +359,38 @@ export default function MessageErrTips(props: { msg: Message; onRetry?: () => vo
       {/* Intentional: icon + text label are separate click targets to enlarge the tap area */}
       {onRetry && (
         <Flex mt="xs" gap="xs" align="center">
-          <ActionIcon variant="light" size="sm" color="red" onClick={onRetry} aria-label={t('Retry')}>
-            <IconReload size={14} />
-          </ActionIcon>
-          <Text
-            component="button"
-            size="xs"
-            c="chatbox-tertiary"
-            className="cursor-pointer border-0 bg-transparent p-0"
-            onClick={onRetry}
-          >
-            {t('Retry')}
-          </Text>
+          {isAutoRetrying ? (
+            <>
+              <ActionIcon variant="light" size="sm" color="red" onClick={onStopRetry} aria-label={t('Stop')}>
+                <IconPlayerStopFilled size={14} />
+              </ActionIcon>
+              <Loader size={14} color="red" />
+              <Text
+                component="button"
+                size="xs"
+                c="chatbox-tertiary"
+                className="cursor-pointer border-0 bg-transparent p-0"
+                onClick={onStopRetry}
+              >
+                {t('Stop')}
+              </Text>
+            </>
+          ) : (
+            <>
+              <ActionIcon variant="light" size="sm" color="red" onClick={onRetry} aria-label={t('Retry')}>
+                <IconReload size={14} />
+              </ActionIcon>
+              <Text
+                component="button"
+                size="xs"
+                c="chatbox-tertiary"
+                className="cursor-pointer border-0 bg-transparent p-0"
+                onClick={onRetry}
+              >
+                {t('Retry')}
+              </Text>
+            </>
+          )}
         </Flex>
       )}
       {requestId && (

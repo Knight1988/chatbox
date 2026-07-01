@@ -663,14 +663,32 @@ export default abstract class AbstractAISDKModel implements ModelInterface {
   private handleError(error: unknown, context: string = ''): never {
     if (APICallError.isInstance(error)) {
       const responseBody = this.sanitizeResponseBody(error.statusCode, error.responseBody)
+      console.debug(`[${this.name}] handleError: APICallError`, {
+        statusCode: error.statusCode,
+        url: error.url,
+        responseBodyPreview: responseBody?.slice(0, 300),
+      })
       throw new ApiError(`Error from ${this.name}${context}`, responseBody, error.statusCode)
     }
     if (error instanceof ApiError) {
+      console.debug(`[${this.name}] handleError: ApiError`, {
+        message: error.message,
+        statusCode: error.statusCode,
+        responseBodyPreview: error.responseBody?.slice(0, 300),
+      })
       throw error
     }
     if (error instanceof ChatboxAIAPIError) {
+      console.debug(`[${this.name}] handleError: ChatboxAIAPIError`, {
+        code: error.code,
+        message: error.message,
+      })
       throw error
     }
+    console.debug(`[${this.name}] handleError: unknown error`, {
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+    })
     throw new ApiError(`Error from ${this.name}${context}: ${error}`)
   }
 

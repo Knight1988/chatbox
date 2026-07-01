@@ -116,6 +116,12 @@ export async function initializeTargetMessage(
 export function handleGenerationError(err: unknown, targetMsg: Message, settings: SessionSettings): Message {
   let error = !(err instanceof Error) ? new Error(`${err}`) : err
 
+  console.debug('[handleGenerationError] Original error:', {
+    errorType: err instanceof Error ? err.constructor.name : typeof err,
+    message: err instanceof Error ? err.message : String(err),
+    provider: settings.provider,
+  })
+
   const isExpectedOCRError = error instanceof OCRError && error.cause instanceof BaseError
 
   if (
@@ -130,6 +136,7 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
     // Classify DOMException AbortError (e.g. timeout abort, SSL rejection)
     if (error instanceof DOMException && error.name === 'AbortError') {
       error = new ApiError('Request was aborted. This may be caused by a timeout or connection issue.')
+      console.debug('[handleGenerationError] Classified as: ApiError (AbortError)')
     } else if (!(error instanceof OCRError)) {
       // Classify network-like errors so they match the "Network Error:" prefix pattern
       const msg = error.message.toLowerCase()
@@ -147,9 +154,11 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
           host = new URL(settings.provider || '').origin
         } catch {}
         error = new NetworkError(error.message, host)
+        console.debug('[handleGenerationError] Classified as: NetworkError', { host })
       } else {
         // Wrap as ApiError so the "API Error:" prefix is present and tips can render
         error = new ApiError(error.message)
+        console.debug('[handleGenerationError] Classified as: ApiError (unknown)')
       }
     }
   }
@@ -162,38 +171,48 @@ export function handleGenerationError(err: unknown, targetMsg: Message, settings
   const ocrError = error instanceof OCRError ? error : undefined
   const causeError = ocrError?.cause
 
+  const errorExtra = pickBy(
+    {
+      aiProvider: ocrError ? ocrError.ocrProvider : settings.provider,
+      host:
+        error instanceof NetworkError ? error.host : causeError instanceof NetworkError ? causeError.host : undefined,
+      responseBody:
+        error instanceof ApiError
+          ? error.responseBody
+          : causeError instanceof ApiError
+            ? causeError.responseBody
+            : undefined,
+      httpStatusCode:
+        error instanceof ApiError
+          ? error.statusCode
+          : causeError instanceof ApiError
+            ? causeError.statusCode
+            : undefined,
+      requestId:
+        error instanceof BaseError
+          ? error.requestId
+          : causeError instanceof BaseError
+            ? causeError.requestId
+            : undefined,
+    },
+    identity
+  )
+
+  console.debug('[handleGenerationError] Resolved:', {
+    classifiedAs: error.constructor.name,
+    message: error.message,
+    errorCode,
+    httpStatusCode: (errorExtra as Record<string, unknown>)?.httpStatusCode,
+    requestId: (errorExtra as Record<string, unknown>)?.requestId,
+  })
+
   return {
     ...targetMsg,
     generating: false,
     cancel: undefined,
     errorCode: ocrError ? (causeError instanceof BaseError ? causeError.code : errorCode) : errorCode,
     error: `${error.message}`,
-    errorExtra: pickBy(
-      {
-        aiProvider: ocrError ? ocrError.ocrProvider : settings.provider,
-        host:
-          error instanceof NetworkError ? error.host : causeError instanceof NetworkError ? causeError.host : undefined,
-        responseBody:
-          error instanceof ApiError
-            ? error.responseBody
-            : causeError instanceof ApiError
-              ? causeError.responseBody
-              : undefined,
-        httpStatusCode:
-          error instanceof ApiError
-            ? error.statusCode
-            : causeError instanceof ApiError
-              ? causeError.statusCode
-              : undefined,
-        requestId:
-          error instanceof BaseError
-            ? error.requestId
-            : causeError instanceof BaseError
-              ? causeError.requestId
-              : undefined,
-      },
-      identity
-    ),
+    errorExtra,
     status: [],
   }
 }

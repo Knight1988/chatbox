@@ -24,7 +24,7 @@ import * as dateFns from 'date-fns'
 import { concat } from 'lodash'
 import type { UIElementData } from 'photoswipe'
 import type React from 'react'
-import { type FC, forwardRef, type MouseEventHandler, memo, useCallback, useMemo, useRef, useState } from 'react'
+import { type FC, forwardRef, type MouseEventHandler, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Gallery, Item as GalleryItem } from 'react-photoswipe-gallery'
 import { trackJkClickEvent } from '@/analytics/jk'
@@ -135,6 +135,36 @@ const _Message: FC<Props> = (props) => {
     handleStop()
     regenerateInNewFork(sessionId, msg)
   }, [handleStop, sessionId, msg])
+
+  const isAutoRetryingRef = useRef(false)
+  const [isAutoRetrying, setIsAutoRetrying] = useState(false)
+
+  const handleStartAutoRetry = useCallback(() => {
+    isAutoRetryingRef.current = true
+    setIsAutoRetrying(true)
+    handleStop()
+    regenerateInNewFork(sessionId, msg)
+  }, [handleStop, sessionId, msg])
+
+  const handleStopAutoRetry = useCallback(() => {
+    isAutoRetryingRef.current = false
+    setIsAutoRetrying(false)
+  }, [])
+
+  // When auto-retrying, fire the next attempt whenever the message lands a new error
+  useEffect(() => {
+    if (!isAutoRetryingRef.current) return
+    if (!msg.error) {
+      // Success — stop the loop
+      isAutoRetryingRef.current = false
+      setIsAutoRetrying(false)
+      return
+    }
+    if (msg.generating) return // still in-flight, wait
+    // Has error and not generating: fire the next retry
+    handleStop()
+    regenerateInNewFork(sessionId, msg)
+  }, [msg.error, msg.generating, sessionId, msg, handleStop])
 
   const onGenerateMore = useCallback(() => {
     generateMore(sessionId, msg.id)
@@ -518,7 +548,9 @@ const _Message: FC<Props> = (props) => {
         )}
         <MessageErrTips
           msg={msg}
-          onRetry={msg.role === 'assistant' ? handleRefresh : undefined}
+          onRetry={msg.role === 'assistant' ? handleStartAutoRetry : undefined}
+          onStopRetry={msg.role === 'assistant' ? handleStopAutoRetry : undefined}
+          isAutoRetrying={msg.role === 'assistant' ? isAutoRetrying : false}
           isBubbleLayout={isBubbleLayout}
         />
         {needCollapse && !isCollapsed && CollapseButton}

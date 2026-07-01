@@ -88,6 +88,15 @@ function sanitizeResponseBody(status: number, response: string): string {
   return response
 }
 
+function getSafeUrlPath(url: RequestInfo | URL): string {
+  try {
+    const u = url instanceof Request ? new URL(url.url) : new URL(url)
+    return `${u.origin}${u.pathname}`
+  } catch {
+    return String(url).split('?')[0]
+  }
+}
+
 export function createAfetch(platformInfo: PlatformInfo) {
   return async function afetch(
     url: RequestInfo | URL,
@@ -99,7 +108,13 @@ export function createAfetch(platformInfo: PlatformInfo) {
   ) {
     let requestError: BaseError | null = null
     const retry = options.retry || 0
+    const urlPath = getSafeUrlPath(url)
+    const method = (init?.method || 'GET').toUpperCase()
     for (let i = 0; i < retry + 1; i++) {
+      if (i > 0) {
+        console.debug(`[afetch] Retry attempt ${i}/${retry}: ${method} ${urlPath}`)
+      }
+      const attemptStart = Date.now()
       try {
         if (isChatboxAPI(url)) {
           init = {
@@ -113,12 +128,21 @@ export function createAfetch(platformInfo: PlatformInfo) {
             },
           }
         }
+        console.debug(`[afetch] Request: ${method} ${urlPath} (attempt ${i + 1}/${retry + 1})`)
         const res = await fetch(url, init)
+        const durationMs = Date.now() - attemptStart
         // 状态码不在 200～299 之间，一般是接口报错了，这里也需要抛错后重试
         if (!res.ok) {
           const response = await res.text().catch((e: unknown) => {
             console.error('[afetch] Failed to read error response body:', e)
             return ''
+          })
+          console.debug(`[afetch] Response error: ${res.status} ${method} ${urlPath} in ${durationMs}ms`, {
+            cfRay: res.headers.get('cf-ray'),
+            xRequestId: res.headers.get('x-request-id'),
+            contentType: res.headers.get('content-type'),
+            retryAfter: res.headers.get('retry-after'),
+            bodyPreview: response.slice(0, 500),
           })
           const requestId = getChatboxRequestId(response, res.headers)
           if (options.parseChatboxRemoteError) {
@@ -135,6 +159,7 @@ export function createAfetch(platformInfo: PlatformInfo) {
             requestId
           )
         }
+        console.debug(`[afetch] Success: ${res.status} ${method} ${urlPath} in ${durationMs}ms`)
         return res
       } catch (e) {
         if (isAbortError(e, init?.signal)) {
@@ -144,8 +169,12 @@ export function createAfetch(platformInfo: PlatformInfo) {
           requestError = e
         } else {
           const err = toError(e)
+          console.debug(`[afetch] Network error on attempt ${i + 1}/${retry + 1}: ${err.name}: ${err.message}`, { url: urlPath })
           const origin = getRequestOrigin(url)
           requestError = new NetworkError(err.message, origin)
+        }
+        if (i < retry) {
+          console.debug(`[afetch] Waiting 500ms before retry ${i + 2}/${retry + 1}…`)
         }
         await new Promise((resolve) => setTimeout(resolve, 500))
       }
@@ -243,10 +272,18 @@ export function createAuthenticatedAfetch(config: AuthenticatedAfetchConfig) {
 
     let requestError: BaseError | null = null
     const retry = options.retry || 0
+    const urlPath = getSafeUrlPath(url)
+    const method = (init?.method || 'GET').toUpperCase()
 
     for (let i = 0; i < retry + 1; i++) {
+      if (i > 0) {
+        console.debug(`[authenticatedAfetch] Retry attempt ${i}/${retry}: ${method} ${urlPath}`)
+      }
+      const attemptStart = Date.now()
       try {
+        console.debug(`[authenticatedAfetch] Request: ${method} ${urlPath} (attempt ${i + 1}/${retry + 1})`)
         const res = await fetch(url, init)
+        const durationMs = Date.now() - attemptStart
 
         // 检查 401 Unauthorized
         if (res.status === 401) {
@@ -293,6 +330,13 @@ export function createAuthenticatedAfetch(config: AuthenticatedAfetchConfig) {
               console.error('[authenticatedAfetch] Failed to read retry error response body:', e)
               return ''
             })
+            console.debug(`[authenticatedAfetch] Response error after token refresh: ${retryRes.status} ${method} ${urlPath} in ${Date.now() - attemptStart}ms`, {
+              cfRay: retryRes.headers.get('cf-ray'),
+              xRequestId: retryRes.headers.get('x-request-id'),
+              contentType: retryRes.headers.get('content-type'),
+              retryAfter: retryRes.headers.get('retry-after'),
+              bodyPreview: response.slice(0, 500),
+            })
             const requestId = getChatboxRequestId(response, retryRes.headers)
             if (options.parseChatboxRemoteError) {
               const errorCodeName = getChatboxErrorCode(response)
@@ -318,6 +362,13 @@ export function createAuthenticatedAfetch(config: AuthenticatedAfetchConfig) {
             console.error('[authenticatedAfetch] Failed to read error response body:', e)
             return ''
           })
+          console.debug(`[authenticatedAfetch] Response error: ${res.status} ${method} ${urlPath} in ${durationMs}ms`, {
+            cfRay: res.headers.get('cf-ray'),
+            xRequestId: res.headers.get('x-request-id'),
+            contentType: res.headers.get('content-type'),
+            retryAfter: res.headers.get('retry-after'),
+            bodyPreview: response.slice(0, 500),
+          })
           const requestId = getChatboxRequestId(response, res.headers)
           if (options.parseChatboxRemoteError) {
             const errorCodeName = getChatboxErrorCode(response)
@@ -334,6 +385,7 @@ export function createAuthenticatedAfetch(config: AuthenticatedAfetchConfig) {
           )
         }
 
+        console.debug(`[authenticatedAfetch] Success: ${res.status} ${method} ${urlPath} in ${durationMs}ms`)
         return res
       } catch (e) {
         if (isAbortError(e, init?.signal)) {
@@ -343,8 +395,12 @@ export function createAuthenticatedAfetch(config: AuthenticatedAfetchConfig) {
           requestError = e
         } else {
           const err = toError(e)
+          console.debug(`[authenticatedAfetch] Network error on attempt ${i + 1}/${retry + 1}: ${err.name}: ${err.message}`, { url: urlPath })
           const origin = getRequestOrigin(url)
           requestError = new NetworkError(err.message, origin)
+        }
+        if (i < retry) {
+          console.debug(`[authenticatedAfetch] Waiting 500ms before retry ${i + 2}/${retry + 1}…`)
         }
         await new Promise((resolve) => setTimeout(resolve, 500))
       }
